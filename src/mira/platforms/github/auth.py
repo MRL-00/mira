@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 import time
@@ -30,6 +32,11 @@ def _resolve_private_key(value: str) -> str:
     if value.startswith("@"):
         with open(value[1:]) as f:
             return f.read()
+    if value.startswith("base64:"):
+        try:
+            return base64.b64decode(value.removeprefix("base64:"), validate=True).decode()
+        except (binascii.Error, UnicodeDecodeError) as exc:
+            raise ValueError("Invalid base64-encoded GitHub private key") from exc
     return value
 
 

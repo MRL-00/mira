@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import time
 
 import jwt as pyjwt
@@ -27,6 +28,14 @@ def rsa_private_key() -> str:
 @pytest.fixture
 def app_auth(rsa_private_key: str) -> GitHubAppAuth:
     return GitHubAppAuth(app_id="12345", private_key=rsa_private_key)
+
+
+def test_accepts_base64_private_key(rsa_private_key: str) -> None:
+    encoded = base64.b64encode(rsa_private_key.encode()).decode()
+
+    auth = GitHubAppAuth(app_id="12345", private_key=f"base64:{encoded}")
+
+    assert auth._private_key == rsa_private_key
 
 
 def test_generate_jwt_structure(app_auth: GitHubAppAuth) -> None:
