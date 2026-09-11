@@ -43,7 +43,7 @@ from mira.providers import create_provider
 
 logger = logging.getLogger(__name__)
 
-_PR_ACTIONS = {"opened", "synchronize", "reopened"}
+_PR_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
 _PR_MERGE_ACTIONS = {"closed"}
 
 
@@ -475,6 +475,9 @@ async def dispatch_github_event(
         sender = payload.get("sender", {}).get("login", "")
         if sender == f"{bot_name}[bot]":
             logger.debug("Ignoring pull_request event from self (%s)", sender)
+            return "ignored"
+
+        if payload.get("pull_request", {}).get("draft", False):
             return "ignored"
 
         # Opt out of per-push reviews: only open/reopen auto-review, later
