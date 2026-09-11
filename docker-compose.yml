@@ -7,11 +7,12 @@ services:
     environment:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       DATABASE_URL: postgresql://mira:${MIRA_POSTGRES_PASSWORD}@postgres:5432/mira
-      MIRA_BOT_NAME: aj-hackett-mira
+      MIRA_BOT_NAME: mira
       MIRA_DASHBOARD_URL: https://mira.matt-nz.com
       MIRA_GITHUB_APP_ID: ${MIRA_GITHUB_APP_ID}
       MIRA_GITHUB_PRIVATE_KEY: ${MIRA_GITHUB_PRIVATE_KEY}
       MIRA_INDEX_DIR: /data/indexes
+      MIRA_LINEAR_API_KEY: ${MIRA_LINEAR_API_KEY}
       MIRA_MODEL: deepseek/deepseek-v4-flash
       MIRA_WEBHOOK_SECRET: ${MIRA_WEBHOOK_SECRET}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
