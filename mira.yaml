@@ -1,0 +1,6 @@
+llm:
+  model: deepseek/deepseek-v4-flash
+  indexing_model: deepseek/deepseek-v4-flash
+
+review:
+  review_on_synchronize: false

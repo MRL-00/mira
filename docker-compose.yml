@@ -1,0 +1,47 @@
+services:
+  mira:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      DATABASE_URL: postgresql://mira:${MIRA_POSTGRES_PASSWORD}@postgres:5432/mira
+      MIRA_BOT_NAME: aj-hackett-mira
+      MIRA_DASHBOARD_URL: https://mira.matt-nz.com
+      MIRA_GITHUB_APP_ID: ${MIRA_GITHUB_APP_ID}
+      MIRA_GITHUB_PRIVATE_KEY: ${MIRA_GITHUB_PRIVATE_KEY}
+      MIRA_INDEX_DIR: /data/indexes
+      MIRA_MODEL: deepseek/deepseek-v4-flash
+      MIRA_WEBHOOK_SECRET: ${MIRA_WEBHOOK_SECRET}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+    volumes:
+      - mira-indexes:/data/indexes
+      - ./mira.yaml:/app/mira.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - --config
+      - /app/mira.yaml
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mira
+      POSTGRES_PASSWORD: ${MIRA_POSTGRES_PASSWORD}
+      POSTGRES_USER: mira
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U mira -d mira
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mira-postgres:/var/lib/postgresql/data
+
+volumes:
+  mira-indexes:
+  mira-postgres:
