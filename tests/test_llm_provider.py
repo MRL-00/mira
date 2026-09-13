@@ -595,6 +595,25 @@ class TestToolChoiceFallback:
             )
         assert "anthropic/claude-sonnet-4-6" not in provider._no_forced_tool_choice
 
+    @pytest.mark.asyncio
+    async def test_retries_failed_tool_call_as_structured_json(self):
+        provider = LLMProvider(LLMConfig(model="deepseek/model", max_retries=1))
+        failed = _mock_httpx_response({}, status_code=500)
+        recovered = _mock_httpx_response(_make_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([failed, recovered])
+            result = await provider.complete_with_tools(
+                [{"role": "user", "content": "review"}], tools=[self._TOOL]
+            )
+            posts = cls.return_value.post.call_args_list
+
+        assert result == '{"comments": []}'
+        assert len(posts) == 2
+        assert "tools" in posts[0].kwargs["json"]
+        assert posts[1].kwargs["json"]["response_format"] == {"type": "json_object"}
+        assert "JSON schema" in posts[1].kwargs["json"]["messages"][-1]["content"]
+
 
 class TestReasoningFallback:
     """Thinking mode is opt-in and applied to whatever model is selected; a

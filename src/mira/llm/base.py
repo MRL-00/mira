@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import ClassVar, Protocol, runtime_checkable
@@ -303,6 +304,34 @@ class OpenAICompatibleProvider:
         except NonRetriableLLMError:
             raise
         except Exception as primary_err:
+            if tools:
+                tool = tools[0].get("function", {})
+                tool_name = tool.get("name", "the requested function")
+                schema = json.dumps(tool.get("parameters", {}), separators=(",", ":"))
+                fallback_messages = [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Return only the JSON arguments for {tool_name}. "
+                            f"The response must match this JSON schema: {schema}"
+                        ),
+                    },
+                ]
+                try:
+                    logger.warning(
+                        "Tool call with %s failed (%s), retrying as structured JSON",
+                        self.config.model,
+                        primary_err,
+                    )
+                    return await self._call_llm(
+                        self.config.model,
+                        fallback_messages,
+                        True,
+                        temperature=temperature,
+                    )
+                except Exception as json_err:
+                    primary_err = json_err
             if self.config.fallback_model:
                 logger.warning(
                     "Primary model %s failed (%s), trying fallback %s",

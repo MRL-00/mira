@@ -423,6 +423,25 @@ class TestSanitizeMermaid:
 
         assert _sanitize_mermaid("") == ""
 
+    def test_repairs_trailing_json_garbage(self):
+        diagram = (
+            'graph LR\n  main["Main.svelte"] --> test["Main.test.ts"]\n'
+            "  classDef testStyle fill:#e0e7ff;\n"
+            '  class test testStyle;"\n,\n'
+        )
+        assert self._sanitize(diagram) == (
+            'graph LR\n  main["Main.svelte"] --> test["Main.test.ts"]\n'
+            "  classDef testStyle fill:#e0e7ff;\n"
+            "  class test testStyle;"
+        )
+
+    def test_drops_diagram_with_unbalanced_quotes(self):
+        diagram = 'graph LR\n  main["Main.svelte --> test'
+        assert self._sanitize(diagram) == ""
+
+    def test_drops_non_flow_diagram(self):
+        assert self._sanitize("sequenceDiagram\n  Alice->>Bob: Hello") == ""
+
     def test_repairs_label_with_extra_garbage(self):
         """Real failure mode from PR#41 — a path like `prompts/"review.py" + footguns.py"`
         gets cleaned to `prompts/review.py + footguns.py`."""

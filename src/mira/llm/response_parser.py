@@ -487,8 +487,22 @@ def _sanitize_mermaid(diagram: str) -> str:
     pair around the cleaned text — and pass through well-formed groups
     untouched.
     """
-    if not diagram or '"' not in diagram:
+    if not diagram:
         return diagram
+
+    lines = diagram.strip().splitlines()
+    while lines and lines[0].strip().startswith("```"):
+        lines.pop(0)
+    cleaned_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped in {",", '"', '",'}:
+            break
+        cleaned_lines.append(re.sub(r'([;,])"\s*,?\s*$', r"\1", line))
+    diagram = "\n".join(cleaned_lines).strip()
+
+    if not diagram.startswith("graph LR"):
+        return ""
 
     def fix(match: re.Match[str]) -> str:
         content = match.group(1)
@@ -500,7 +514,12 @@ def _sanitize_mermaid(diagram: str) -> str:
         cleaned = content.replace('"', "").strip()
         return f'["{cleaned}"]'
 
-    return _MERMAID_LABEL_RE.sub(fix, diagram)
+    diagram = _MERMAID_LABEL_RE.sub(fix, diagram)
+    if any(line.count('"') % 2 for line in diagram.splitlines()):
+        return ""
+    if diagram.count("[") != diagram.count("]"):
+        return ""
+    return diagram
 
 
 def convert_to_walkthrough_result(response: LLMWalkthroughResponse) -> WalkthroughResult:
