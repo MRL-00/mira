@@ -223,6 +223,12 @@ class OpenAICompatibleProvider:
         """
         effort = self.config.reasoning_effort
         if not effort or effort == "off":
+            model = str(body.get("model", "")).split(":", 1)[0]
+            if (
+                self.config.base_url.rstrip("/") == "https://openrouter.ai/api/v1"
+                and model == "deepseek/deepseek-v4.1-flash"
+            ):
+                body["reasoning"] = {"effort": "none"}
             return
         if body.get("model") in self._no_reasoning:
             return

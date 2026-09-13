@@ -679,6 +679,22 @@ class TestReasoningFallback:
         return mock_client
 
     @pytest.mark.asyncio
+    async def test_disables_default_reasoning_for_deepseek_v41_flash(self):
+        provider = LLMProvider(
+            LLMConfig(model="deepseek/deepseek-v4.1-flash:exacto", reasoning_effort=None)
+        )
+        ok = _mock_httpx_response(_make_tool_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([ok])
+            await provider.complete_with_tools(
+                [{"role": "user", "content": "hi"}], tools=[self._TOOL]
+            )
+            body = cls.return_value.post.call_args.kwargs["json"]
+
+        assert body["reasoning"] == {"effort": "none"}
+
+    @pytest.mark.asyncio
     async def test_retries_without_reasoning_on_400(self):
         provider = LLMProvider(LLMConfig(model="some/model", reasoning_effort="high"))
         rejected = _mock_httpx_response(
