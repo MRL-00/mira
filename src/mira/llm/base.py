@@ -18,6 +18,36 @@ from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
 logger = logging.getLogger(__name__)
 
 
+def _normalize_json_tool_result(raw: str, tool: dict) -> str:
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+    if not isinstance(data, list):
+        return raw
+
+    schema = tool.get("function", {}).get("parameters", {})
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    array_fields = [
+        name
+        for name in required
+        if isinstance(properties.get(name), dict) and properties[name].get("type") == "array"
+    ]
+    if len(array_fields) != 1:
+        return raw
+
+    normalized: dict[str, object] = {array_fields[0]: data}
+    defaults = {"array": [], "object": {}, "string": "", "integer": 0, "number": 0}
+    for name in required:
+        if name in normalized:
+            continue
+        field_type = properties.get(name, {}).get("type")
+        if field_type in defaults:
+            normalized[name] = defaults[field_type]
+    return json.dumps(normalized)
+
+
 @runtime_checkable
 class LLMProviderProtocol(Protocol):
     """Structural interface for LLM providers.
@@ -324,12 +354,13 @@ class OpenAICompatibleProvider:
                         self.config.model,
                         primary_err,
                     )
-                    return await self._call_llm(
+                    result = await self._call_llm(
                         self.config.model,
                         fallback_messages,
                         True,
                         temperature=temperature,
                     )
+                    return _normalize_json_tool_result(result, tools[0])
                 except Exception as json_err:
                     primary_err = json_err
             if self.config.fallback_model:

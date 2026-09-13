@@ -614,6 +614,37 @@ class TestToolChoiceFallback:
         assert posts[1].kwargs["json"]["response_format"] == {"type": "json_object"}
         assert "JSON schema" in posts[1].kwargs["json"]["messages"][-1]["content"]
 
+    @pytest.mark.asyncio
+    async def test_wraps_bare_array_from_structured_json_retry(self):
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "submit_review",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "comments": {"type": "array"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["comments", "summary"],
+                },
+            },
+        }
+        provider = LLMProvider(LLMConfig(model="deepseek/model", max_retries=1))
+        failed = _mock_httpx_response({}, status_code=500)
+        recovered = _mock_httpx_response(_make_response_json('[{"path":"src/app.py"}]'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([failed, recovered])
+            result = await provider.complete_with_tools(
+                [{"role": "user", "content": "review"}], tools=[tool]
+            )
+
+        assert json.loads(result) == {
+            "comments": [{"path": "src/app.py"}],
+            "summary": "",
+        }
+
 
 class TestReasoningFallback:
     """Thinking mode is opt-in and applied to whatever model is selected; a
