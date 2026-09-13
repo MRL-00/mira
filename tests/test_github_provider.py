@@ -11,7 +11,17 @@ from github import GithubException
 
 from mira.core.diff_parser import parse_diff
 from mira.exceptions import ProviderError
-from mira.models import FileChangeType, PRInfo, ReviewComment, ReviewResult, Severity
+from mira.models import (
+    FileChangeType,
+    PRInfo,
+    ReviewComment,
+    ReviewResult,
+    Severity,
+    WalkthroughConfidenceScore,
+    WalkthroughEffort,
+    WalkthroughFileEntry,
+    WalkthroughResult,
+)
 from mira.providers.github import (
     _CATEGORY_DISPLAY,
     GitHubProvider,
@@ -405,20 +415,53 @@ class TestReviewVerdict:
         commit.get_check_runs.return_value = [run]
         result = ReviewResult(
             summary="No issues found.",
+            reviewed_files=2,
             total_paths=["src/app.py", "docs/review.md"],
             linear_issue_ids=["EPIC-948"],
             linear_issue_urls=["https://linear.app/example/issue/EPIC-948"],
             linear_lookup_status="loaded",
+            walkthrough=WalkthroughResult(
+                summary="Adds structured review output.",
+                file_changes=[
+                    WalkthroughFileEntry(
+                        path="src/app.py",
+                        change_type=FileChangeType.MODIFIED,
+                        description="Publishes richer review details.",
+                        group="Review publishing",
+                    ),
+                    WalkthroughFileEntry(
+                        path="docs/review.md",
+                        change_type=FileChangeType.ADDED,
+                        description="Documents the review format.",
+                        group="Documentation",
+                    ),
+                ],
+                effort=WalkthroughEffort(level=1, label="Small", minutes=10),
+                confidence_score=WalkthroughConfidenceScore(
+                    score=5,
+                    label="Safe to merge",
+                    reason="Focused change with passing checks.",
+                ),
+            ),
         )
 
         body, event = _review_body_and_event(result, commit)
 
         assert event == "APPROVE"
-        assert "| **About:** | No issues found. |" in body
+        assert "| **About:** | Adds structured review output. |" in body
         assert "| **Tests Pass:** | Yes — 1 passed, 0 failed, 0 skipped, 0 pending |" in body
         assert "| **Includes Documentation:** | Yes — `docs/review.md` |" in body
         assert "| **Reviewed against Linear ticket and approved:** | Yes — [EPIC-948]" in body
         assert "| **Final verdict:** | APPROVE |" in body
+        assert "### Review coverage" in body
+        assert "**Files:** 2 reviewed of 2 changed files" in body
+        assert "**Confidence:** 5/5 — Safe to merge" in body
+        assert "### Change map" in body
+        assert 'pr["Pull request"]' in body
+        assert 'f0["src/app.py"]' in body
+        assert "<summary><b>Changed files</b></summary>" in body
+        assert "| Modified | `src/app.py` | Publishes richer review details. |" in body
+        assert "No actionable findings survived Mira's evidence and self-critique checks." in body
 
     def test_clean_review_without_green_checks_is_comment(self):
         run = MagicMock(conclusion="skipped")

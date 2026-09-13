@@ -136,6 +136,98 @@ def _linear_review_value(result: ReviewResult) -> tuple[str, bool]:
     return f"Yes — {linked}", True
 
 
+def _markdown_cell(value: str) -> str:
+    return _table_value(value).replace("`", "&#96;")
+
+
+def _change_map(result: ReviewResult) -> str:
+    if result.walkthrough is None or not result.walkthrough.file_changes:
+        return ""
+
+    entries = result.walkthrough.file_changes[:12]
+    group_ids: dict[str, str] = {}
+    lines = ["flowchart LR", '  pr["Pull request"]']
+    for index, entry in enumerate(entries):
+        group = entry.group.strip() or "Changed files"
+        if group not in group_ids:
+            group_id = f"g{len(group_ids)}"
+            group_ids[group] = group_id
+            safe_group = " ".join(group.split()).replace('"', "'")
+            lines.append(f'  {group_id}["{safe_group}"]')
+            lines.append(f"  pr --> {group_id}")
+        file_id = f"f{index}"
+        safe_path = entry.path.replace('"', "'")
+        lines.append(f'  {file_id}["{safe_path}"]')
+        lines.append(f"  {group_ids[group]} --> {file_id}")
+    if result.walkthrough.file_changes[12:]:
+        remaining = len(result.walkthrough.file_changes) - 12
+        lines.append(f'  more["+{remaining} more files"]')
+        lines.append("  pr --> more")
+    return "\n".join(lines)
+
+
+def _review_details(result: ReviewResult) -> list[str]:
+    lines = ["", "### Review coverage", ""]
+    total = len(result.total_paths)
+    reviewed = result.reviewed_files or len(result.reviewed_paths)
+    coverage = f"{reviewed} reviewed"
+    if total:
+        coverage += f" of {total} changed files"
+    lines.append(f"- **Files:** {coverage}")
+    lines.append(f"- **Inline findings:** {len(result.comments)}")
+    if result.skipped_paths:
+        lines.append(f"- **Skipped:** {len(result.skipped_paths)} files")
+    else:
+        lines.append("- **Skipped:** None")
+
+    walkthrough = result.walkthrough
+    if walkthrough is not None and walkthrough.confidence_score is not None:
+        confidence = walkthrough.confidence_score
+        label = f" — {confidence.label}" if confidence.label else ""
+        lines.append(f"- **Confidence:** {confidence.score}/5{label}")
+        if confidence.reason:
+            lines.append(f"- **Confidence basis:** {_table_value(confidence.reason)}")
+    if walkthrough is not None and walkthrough.effort is not None:
+        effort = walkthrough.effort
+        lines.append(
+            f"- **Estimated human review effort:** {effort.minutes} minutes ({effort.label})"
+        )
+
+    diagram = _change_map(result)
+    if diagram:
+        lines.extend(("", "### Change map", "", "```mermaid", diagram, "```"))
+
+    if walkthrough is not None and walkthrough.file_changes:
+        lines.extend(
+            (
+                "",
+                "<details>",
+                "<summary><b>Changed files</b></summary>",
+                "",
+                "| Change | File | What changed |",
+                "| --- | --- | --- |",
+            )
+        )
+        for entry in walkthrough.file_changes[:20]:
+            change = entry.change_type.value.title()
+            description = _markdown_cell(entry.description or "No description generated.")
+            lines.append(f"| {change} | `{entry.path}` | {description} |")
+        if len(walkthrough.file_changes) > 20:
+            lines.append(
+                f"| — | _{len(walkthrough.file_changes) - 20} additional files_ | See the PR diff. |"
+            )
+        lines.extend(("", "</details>"))
+
+    lines.extend(("", "### Review outcome", ""))
+    if result.comments:
+        lines.append(f"{len(result.comments)} actionable finding(s) are attached inline.")
+    else:
+        lines.append("No actionable findings survived Mira's evidence and self-critique checks.")
+    if result.summary and result.summary != "No issues found.":
+        lines.extend(("", result.summary))
+    return lines
+
+
 def _review_body_and_event(result: ReviewResult, commit: Any) -> tuple[str, str]:
     tests, tests_pass, checks_green = _github_checks(commit)
     linear_value, linear_approved = _linear_review_value(result)
@@ -165,10 +257,7 @@ def _review_body_and_event(result: ReviewResult, commit: Any) -> tuple[str, str]
     ]
     lines = ["| Field | Value |", "| --- | --- |"]
     lines.extend(f"| {field} | {_table_value(value)} |" for field, value in rows)
-    if result.comments:
-        lines.extend(("", f"{len(result.comments)} inline finding(s) accompany this review."))
-    elif result.summary:
-        lines.extend(("", result.summary))
+    lines.extend(_review_details(result))
     if result.key_issues:
         lines.append(_format_key_issues(result.key_issues))
     event = {"APPROVE": "APPROVE", "REQUEST_CHANGES": "REQUEST_CHANGES"}.get(verdict, "COMMENT")
