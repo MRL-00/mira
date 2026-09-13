@@ -645,6 +645,24 @@ class TestToolChoiceFallback:
             "summary": "",
         }
 
+    @pytest.mark.asyncio
+    async def test_repairs_invalid_structured_json_retry(self):
+        provider = LLMProvider(LLMConfig(model="deepseek/model", max_retries=1))
+        failed = _mock_httpx_response({}, status_code=500)
+        invalid = _mock_httpx_response(_make_response_json("The review is all clear."))
+        recovered = _mock_httpx_response(_make_response_json('{"comments": []}'))
+
+        with patch("mira.llm.provider.httpx.AsyncClient") as cls:
+            cls.return_value = self._client([failed, invalid, recovered])
+            result = await provider.complete_with_tools(
+                [{"role": "user", "content": "review"}], tools=[self._TOOL]
+            )
+            posts = cls.return_value.post.call_args_list
+
+        assert result == '{"comments": []}'
+        assert len(posts) == 3
+        assert "not valid JSON" in posts[2].kwargs["json"]["messages"][-1]["content"]
+
 
 class TestReasoningFallback:
     """Thinking mode is opt-in and applied to whatever model is selected; a

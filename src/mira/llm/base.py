@@ -14,17 +14,23 @@ from mira.config import LLMConfig
 from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm import provider_profiles as profiles
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
+from mira.llm.utils import strip_code_fences, strip_think_blocks
 
 logger = logging.getLogger(__name__)
 
 
 def _normalize_json_tool_result(raw: str, tool: dict) -> str:
+    cleaned = strip_code_fences(strip_think_blocks(raw))
     try:
-        data = json.loads(raw)
+        data = json.loads(cleaned)
     except (json.JSONDecodeError, TypeError):
-        return raw
+        try:
+            start = next(i for i, char in enumerate(cleaned) if char in "{[")
+            data, _ = json.JSONDecoder().raw_decode(cleaned[start:])
+        except (StopIteration, json.JSONDecodeError, TypeError):
+            return raw
     if not isinstance(data, list):
-        return raw
+        return json.dumps(data)
 
     schema = tool.get("function", {}).get("parameters", {})
     properties = schema.get("properties", {})
@@ -360,7 +366,29 @@ class OpenAICompatibleProvider:
                         True,
                         temperature=temperature,
                     )
-                    return _normalize_json_tool_result(result, tools[0])
+                    normalized = _normalize_json_tool_result(result, tools[0])
+                    try:
+                        json.loads(normalized)
+                    except (json.JSONDecodeError, TypeError):
+                        repair_messages = [
+                            *fallback_messages,
+                            {"role": "assistant", "content": result[-20000:]},
+                            {
+                                "role": "user",
+                                "content": (
+                                    "That response was not valid JSON. Repair it and return "
+                                    "only one JSON value matching the schema, with no prose or fences."
+                                ),
+                            },
+                        ]
+                        result = await self._call_llm(
+                            self.config.model,
+                            repair_messages,
+                            True,
+                            temperature=temperature,
+                        )
+                        normalized = _normalize_json_tool_result(result, tools[0])
+                    return normalized
                 except Exception as json_err:
                     primary_err = json_err
             if self.config.fallback_model:
