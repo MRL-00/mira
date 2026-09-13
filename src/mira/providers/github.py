@@ -8,6 +8,7 @@ import itertools
 import logging
 import os
 import re
+from collections import Counter
 from typing import Any
 
 import httpx
@@ -23,6 +24,7 @@ from mira.models import (
     PRInfo,
     ReviewComment,
     ReviewResult,
+    Severity,
     UnresolvedThread,
 )
 from mira.providers.base import BaseProvider
@@ -61,6 +63,116 @@ _GRAPHQL_URL = os.environ.get(
     "MIRA_GITHUB_GRAPHQL_URL",
     f"{_GITHUB_API_URL}/graphql",
 )
+
+
+def _table_value(value: str) -> str:
+    return " ".join(value.split()).replace("|", "\\|")
+
+
+def _documentation_paths(paths: list[str]) -> list[str]:
+    return [
+        path
+        for path in paths
+        if path.lower().endswith((".md", ".mdx", ".rst"))
+        or path.lower().startswith(("docs/", "documentation/"))
+    ]
+
+
+def _github_checks(commit: Any) -> tuple[str, str, bool]:
+    try:
+        runs = list(commit.get_check_runs())
+    except Exception:
+        return (
+            "Not run — Mira does not execute repository commands; GitHub checks could not be read.",
+            "Unknown",
+            False,
+        )
+
+    if not runs:
+        return (
+            "Not run — Mira does not execute repository commands and no GitHub checks were found.",
+            "Not run — no GitHub checks found",
+            False,
+        )
+
+    conclusions = Counter((getattr(run, "conclusion", None) or "pending").lower() for run in runs)
+    passed = conclusions["success"]
+    skipped = conclusions["skipped"] + conclusions["neutral"]
+    pending = conclusions["pending"]
+    failed = sum(
+        count
+        for conclusion, count in conclusions.items()
+        if conclusion not in {"success", "skipped", "neutral", "pending"}
+    )
+    counts = f"{passed} passed, {failed} failed, {skipped} skipped, {pending} pending"
+    green = passed > 0 and failed == 0 and pending == 0
+    return (
+        f"Not run locally — Mira inspected GitHub checks: {counts}.",
+        f"{'Yes' if green else 'No'} — {counts}",
+        green,
+    )
+
+
+def _linear_review_value(result: ReviewResult) -> tuple[str, bool]:
+    if result.linear_lookup_status == "not_linked":
+        return "N/A — No linked Linear ticket found", True
+    if result.linear_lookup_status != "loaded":
+        identifiers = ", ".join(result.linear_issue_ids)
+        suffix = f" ({identifiers})" if identifiers else ""
+        return f"Unknown — Linear ticket could not be checked{suffix}", False
+
+    links: list[str] = []
+    for index, identifier in enumerate(result.linear_issue_ids):
+        if index < len(result.linear_issue_urls):
+            links.append(f"[{identifier}]({result.linear_issue_urls[index]})")
+        else:
+            links.append(identifier)
+    linked = ", ".join(links)
+    has_blocking_findings = any(
+        comment.severity in {Severity.BLOCKER, Severity.WARNING} for comment in result.comments
+    )
+    if has_blocking_findings:
+        return f"No — {linked}; blocking review findings remain", False
+    return f"Yes — {linked}", True
+
+
+def _review_body_and_event(result: ReviewResult, commit: Any) -> tuple[str, str]:
+    tests, tests_pass, checks_green = _github_checks(commit)
+    linear_value, linear_approved = _linear_review_value(result)
+    docs = _documentation_paths(result.total_paths)
+    docs_value = f"Yes — {', '.join(f'`{path}`' for path in docs)}" if docs else "No"
+    has_blocking_findings = any(
+        comment.severity in {Severity.BLOCKER, Severity.WARNING} for comment in result.comments
+    )
+    if has_blocking_findings:
+        verdict = "REQUEST_CHANGES"
+    elif checks_green and linear_approved:
+        verdict = "APPROVE"
+    else:
+        verdict = "COMMENT"
+
+    about = result.walkthrough.summary if result.walkthrough is not None else ""
+    if not about:
+        about = result.summary or "Review completed."
+
+    rows = [
+        ("**About:**", about),
+        ("**Tests:**", tests),
+        ("**Tests Pass:**", tests_pass),
+        ("**Includes Documentation:**", docs_value),
+        ("**Reviewed against Linear ticket and approved:**", linear_value),
+        ("**Final verdict:**", verdict),
+    ]
+    lines = ["| Field | Value |", "| --- | --- |"]
+    lines.extend(f"| {field} | {_table_value(value)} |" for field, value in rows)
+    if result.comments:
+        lines.extend(("", f"{len(result.comments)} inline finding(s) accompany this review."))
+    elif result.summary:
+        lines.extend(("", result.summary))
+    if result.key_issues:
+        lines.append(_format_key_issues(result.key_issues))
+    event = {"APPROVE": "APPROVE", "REQUEST_CHANGES": "REQUEST_CHANGES"}.get(verdict, "COMMENT")
+    return "\n".join(lines), event
 
 
 def _normalize_login(login: str) -> str:
@@ -413,10 +525,6 @@ class GitHubProvider(BaseProvider):
         result: ReviewResult,
         bot_name: str = "miracodeai",
     ) -> list[int]:
-        if not result.comments:
-            return []
-
-        # The line GitHub anchors a comment to (the end line for multi-line).
         def _anchor(c: ReviewComment) -> int:
             return c.end_line if (c.end_line and c.end_line > c.line) else c.line
 
@@ -435,12 +543,6 @@ class GitHubProvider(BaseProvider):
 
             review_comments.append(rc)
 
-        review_body = ""
-        if result.summary:
-            review_body = f"**Mira Review Summary**\n\n{result.summary}"
-        if result.key_issues:
-            review_body += _format_key_issues(result.key_issues)
-
         @_retry_transient
         def _post() -> list[int]:
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
@@ -450,6 +552,7 @@ class GitHubProvider(BaseProvider):
             if not commits:
                 raise ProviderError("PR has no commits")
             latest_commit = commits[-1]
+            review_body, review_event = _review_body_and_event(result, latest_commit)
 
             # GitHub comment IDs aligned to result.comments (0 = unknown).
             ids = [0] * len(result.comments)
@@ -458,7 +561,7 @@ class GitHubProvider(BaseProvider):
                 review = pr.create_review(
                     commit=latest_commit,
                     body=review_body,
-                    event="COMMENT",
+                    event=review_event,
                     comments=review_comments,  # type: ignore[arg-type]
                 )
                 # Map the posted comments back to ours by (path, anchored line)
@@ -525,7 +628,7 @@ class GitHubProvider(BaseProvider):
                     pr.create_review(
                         commit=latest_commit,
                         body=review_body,
-                        event="COMMENT",
+                        event=review_event,
                         comments=[],
                     )
                 except GithubException as exc:

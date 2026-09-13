@@ -163,7 +163,7 @@ class TestReviewEngine:
         mock_provider.post_review.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_no_post_when_no_comments(self, mock_provider: AsyncMock):
+    async def test_posts_review_when_no_inline_comments(self, mock_provider: AsyncMock):
         llm = MagicMock(spec=LLMProvider)
         no_comments = json.dumps(
             {
@@ -181,7 +181,7 @@ class TestReviewEngine:
         engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider)
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
-        mock_provider.post_review.assert_not_called()
+        mock_provider.post_review.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_empty_diff(self, mock_llm: LLMProvider):

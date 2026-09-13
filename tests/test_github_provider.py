@@ -16,6 +16,7 @@ from mira.providers.github import (
     _CATEGORY_DISPLAY,
     GitHubProvider,
     _format_comment_body,
+    _review_body_and_event,
     parse_pr_url,
 )
 
@@ -330,7 +331,7 @@ class TestPostReviewGracefulDegradation:
         # Summary-only call is the last /reviews call and has comments=[].
         final = review_calls[-1]
         assert final.get("comments") == []
-        assert "Mira Review Summary" in final.get("body", "")
+        assert "| **Final verdict:** | REQUEST_CHANGES |" in final.get("body", "")
 
     @pytest.mark.asyncio
     async def test_partial_individual_success(self):
@@ -395,6 +396,91 @@ class TestPostReviewGracefulDegradation:
         # No summary-only fallback because b.py posted.
         assert mock_pr.create_review.call_count == 1
         assert mock_pr.create_review_comment.call_count == 2
+
+
+class TestReviewVerdict:
+    def test_clean_review_with_green_checks_is_approved(self):
+        run = MagicMock(conclusion="success")
+        commit = MagicMock()
+        commit.get_check_runs.return_value = [run]
+        result = ReviewResult(
+            summary="No issues found.",
+            total_paths=["src/app.py", "docs/review.md"],
+            linear_issue_ids=["EPIC-948"],
+            linear_issue_urls=["https://linear.app/example/issue/EPIC-948"],
+            linear_lookup_status="loaded",
+        )
+
+        body, event = _review_body_and_event(result, commit)
+
+        assert event == "APPROVE"
+        assert "| **About:** | No issues found. |" in body
+        assert "| **Tests Pass:** | Yes — 1 passed, 0 failed, 0 skipped, 0 pending |" in body
+        assert "| **Includes Documentation:** | Yes — `docs/review.md` |" in body
+        assert "| **Reviewed against Linear ticket and approved:** | Yes — [EPIC-948]" in body
+        assert "| **Final verdict:** | APPROVE |" in body
+
+    def test_clean_review_without_green_checks_is_comment(self):
+        run = MagicMock(conclusion="skipped")
+        commit = MagicMock()
+        commit.get_check_runs.return_value = [run]
+        result = ReviewResult(summary="No issues found.")
+
+        body, event = _review_body_and_event(result, commit)
+
+        assert event == "COMMENT"
+        assert "| **Tests Pass:** | No — 0 passed, 0 failed, 1 skipped, 0 pending |" in body
+        assert "N/A — No linked Linear ticket found" in body
+        assert "| **Final verdict:** | COMMENT |" in body
+
+    def test_warning_requests_changes(self):
+        run = MagicMock(conclusion="success")
+        commit = MagicMock()
+        commit.get_check_runs.return_value = [run]
+        result = ReviewResult(
+            comments=[
+                ReviewComment(
+                    path="a.py",
+                    line=1,
+                    end_line=None,
+                    severity=Severity.WARNING,
+                    category="bug",
+                    title="Issue",
+                    body="desc",
+                    confidence=0.9,
+                )
+            ],
+            linear_issue_ids=["EPIC-948"],
+            linear_issue_urls=["https://linear.app/example/issue/EPIC-948"],
+            linear_lookup_status="loaded",
+        )
+
+        body, event = _review_body_and_event(result, commit)
+
+        assert event == "REQUEST_CHANGES"
+        assert "blocking review findings remain" in body
+        assert "| **Final verdict:** | REQUEST_CHANGES |" in body
+
+    @pytest.mark.asyncio
+    async def test_posts_review_without_inline_comments(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        commit = MagicMock()
+        commit.get_check_runs.return_value = []
+        pr = MagicMock()
+        pr.get_commits.return_value = [commit]
+        repo = MagicMock()
+        repo.get_pull.return_value = pr
+        provider._github = MagicMock()
+        provider._github.get_repo.return_value = repo
+
+        await provider.post_review(_make_pr_info(), ReviewResult(summary="No issues found."))
+
+        pr.create_review.assert_called_once()
+        kwargs = pr.create_review.call_args.kwargs
+        assert kwargs["event"] == "COMMENT"
+        assert kwargs["comments"] == []
+        assert "| **Final verdict:** | COMMENT |" in kwargs["body"]
 
 
 class TestFormatCommentBody:

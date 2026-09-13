@@ -51,4 +51,4 @@ filter:
 
 review:
   review_on_synchronize: false
-  agentic_tools: false
+  agentic_tools: true

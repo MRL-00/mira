@@ -33,7 +33,7 @@ from mira.exceptions import MiraError, ResponseParseError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
-from mira.integrations.linear import fetch_linear_context
+from mira.integrations.linear import extract_linear_issue_identifiers, fetch_linear_context
 from mira.llm.prompts.review import (
     build_review_prompt,
     build_walkthrough_prompt,
@@ -869,20 +869,24 @@ class ReviewEngine:
             llm_resolved,
         )
 
+        result.linear_issue_ids = extract_linear_issue_identifiers(pr_info)
+        result.linear_issue_urls = re.findall(r"^- URL: (https?://\S+)", linked_issue_context, re.M)
+        if result.linear_issue_ids:
+            result.linear_lookup_status = "loaded" if linked_issue_context else "unavailable"
+
         posted_comment_ids: list[int] = []
-        if result.comments:
-            if self.dry_run:
-                logger.info(
-                    "Dry run: would post %d comment(s) on PR %s",
-                    len(result.comments),
-                    pr_info.url,
-                )
-            else:
-                posted_comment_ids = (
-                    await self.provider.post_review(pr_info, result, bot_name=self.bot_name) or []
-                )
+        if not result.comments and not result.summary:
+            logger.info("No review content for PR %s", pr_info.url)
+        elif self.dry_run:
+            logger.info(
+                "Dry run: would post a review with %d inline comment(s) on PR %s",
+                len(result.comments),
+                pr_info.url,
+            )
         else:
-            logger.info("No code suggestions for PR %s", pr_info.url)
+            posted_comment_ids = (
+                await self.provider.post_review(pr_info, result, bot_name=self.bot_name) or []
+            )
 
         result.thread_decisions = thread_decisions
 
