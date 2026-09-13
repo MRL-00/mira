@@ -123,7 +123,9 @@ def parse_llm_response(raw_text: str) -> LLMReviewResponse:
     if data is None:
         raise ResponseParseError("LLM response is not valid JSON (even after repair)")
 
-    if not isinstance(data, dict):
+    if isinstance(data, list):
+        data = {"comments": data}
+    elif not isinstance(data, dict):
         raise ResponseParseError(f"Expected JSON object, got {type(data).__name__}")
 
     data = _unstring_nested_json(data)

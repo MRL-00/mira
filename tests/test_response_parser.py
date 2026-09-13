@@ -63,7 +63,15 @@ class TestParseLLMResponse:
 
     def test_non_object_json(self):
         with pytest.raises(ResponseParseError, match="Expected JSON object"):
-            parse_llm_response("[1, 2, 3]")
+            parse_llm_response('"invalid"')
+
+    def test_parses_fenced_bare_comments_array(self):
+        raw = """```json
+[{"path":"a.py","line":4,"title":"Bug","body":"Details"}]
+```"""
+        result = parse_llm_response(raw)
+        assert len(result.comments) == 1
+        assert result.comments[0].path == "a.py"
 
     def test_missing_fields_use_defaults(self):
         result = parse_llm_response("{}")
