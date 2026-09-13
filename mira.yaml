@@ -1,6 +1,7 @@
 llm:
   model: deepseek/deepseek-v4.1-flash:exacto
   indexing_model: deepseek/deepseek-v4.1-flash
+  max_tokens: 8192
 
 filter:
   exclude_patterns:
@@ -50,3 +51,4 @@ filter:
 
 review:
   review_on_synchronize: false
+  agentic_tools: false
