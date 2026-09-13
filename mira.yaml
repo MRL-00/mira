@@ -1,5 +1,5 @@
 llm:
-  model: deepseek/deepseek-v4.1-flash
+  model: deepseek/deepseek-v4.1-flash:exacto
   indexing_model: deepseek/deepseek-v4.1-flash
 
 filter:
