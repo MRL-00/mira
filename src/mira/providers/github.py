@@ -128,6 +128,13 @@ def _linear_review_value(result: ReviewResult) -> tuple[str, bool]:
         else:
             links.append(identifier)
     linked = ", ".join(links)
+    unmet = [c for c in result.ticket_criteria if c.is_unmet]
+    if unmet:
+        count = len(unmet)
+        return (
+            f"No — {linked}; {count} acceptance criterion{'s' if count != 1 else ''} unmet",
+            False,
+        )
     has_blocking_findings = any(
         comment.severity in {Severity.BLOCKER, Severity.WARNING} for comment in result.comments
     )
@@ -236,7 +243,8 @@ def _review_body_and_event(result: ReviewResult, commit: Any) -> tuple[str, str]
     has_blocking_findings = any(
         comment.severity in {Severity.BLOCKER, Severity.WARNING} for comment in result.comments
     )
-    if has_blocking_findings:
+    unmet_criteria = any(c.is_unmet for c in result.ticket_criteria)
+    if has_blocking_findings or unmet_criteria:
         verdict = "REQUEST_CHANGES"
     elif checks_green and linear_approved:
         verdict = "APPROVE"
@@ -613,7 +621,14 @@ class GitHubProvider(BaseProvider):
         pr_info: PRInfo,
         result: ReviewResult,
         bot_name: str = "miracodeai",
+        request_changes: bool = False,
     ) -> list[int]:
+        # Post when there is anything to say: inline findings, a summary body
+        # (deploy-branch behaviour), or a blocking "Request changes" verdict
+        # with no inline comments.
+        if not result.comments and not result.summary and not request_changes:
+            return []
+
         def _anchor(c: ReviewComment) -> int:
             return c.end_line if (c.end_line and c.end_line > c.line) else c.line
 
@@ -642,6 +657,10 @@ class GitHubProvider(BaseProvider):
                 raise ProviderError("PR has no commits")
             latest_commit = commits[-1]
             review_body, review_event = _review_body_and_event(result, latest_commit)
+            # An unmet linked-ticket criterion (or a blocker) blocks the merge
+            # even when the summary table would otherwise only comment.
+            if request_changes:
+                review_event = "REQUEST_CHANGES"
 
             # GitHub comment IDs aligned to result.comments (0 = unknown).
             ids = [0] * len(result.comments)
@@ -713,19 +732,22 @@ class GitHubProvider(BaseProvider):
 
             # If every inline failed, post the summary alone so the review still shows up.
             if posted == 0 and review_body:
-                try:
-                    pr.create_review(
-                        commit=latest_commit,
-                        body=review_body,
-                        event=review_event,
-                        comments=[],
-                    )
-                except GithubException as exc:
-                    logger.warning(
-                        "Summary-only fallback also failed (%s): %s",
-                        exc.status,
-                        exc.data,
-                    )
+                for event in (review_event, "COMMENT"):
+                    try:
+                        pr.create_review(
+                            commit=latest_commit,
+                            body=review_body,
+                            event=event,
+                            comments=[],
+                        )
+                        break
+                    except GithubException as exc:
+                        logger.warning(
+                            "Summary-only fallback with event=%s failed (%s): %s",
+                            event,
+                            exc.status,
+                            exc.data,
+                        )
 
             logger.info("Individual fallback: posted %d/%d comments", posted, len(review_comments))
             return ids

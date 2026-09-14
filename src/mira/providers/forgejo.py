@@ -265,8 +265,14 @@ class ForgejoProvider(BaseProvider):
     # ── posting ─────────────────────────────────────────────────────
 
     async def post_review(
-        self, pr_info: PRInfo, result: ReviewResult, bot_name: str = "miracodeai"
+        self,
+        pr_info: PRInfo,
+        result: ReviewResult,
+        bot_name: str = "miracodeai",
+        request_changes: bool = False,
     ) -> None:
+        # Forgejo review states are best-effort; the verdict is carried by the
+        # walkthrough comment.
         if not result.comments:
             return
 

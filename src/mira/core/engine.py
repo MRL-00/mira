@@ -29,11 +29,16 @@ from mira.core.passes import (
 )
 from mira.core.priority import rank_files
 from mira.core.threads import resolve_verified_threads, short_thread_description
+from mira.core.ticket_verify import verify_ticket_criteria
 from mira.exceptions import MiraError, ResponseParseError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
-from mira.integrations.linear import extract_linear_issue_identifiers, fetch_linear_context
+from mira.linear import (
+    format_issues_context,
+    issue_identifiers_for_pr,
+    resolve_linked_issues,
+)
 from mira.llm.prompts.review import (
     build_review_prompt,
     build_walkthrough_prompt,
@@ -56,9 +61,11 @@ from mira.models import (
     ReviewResult,
     Severity,
     ThreadDecision,
+    TicketCriterion,
     UnresolvedThread,
     WalkthroughResult,
     build_review_stats,
+    derive_verdict,
 )
 from mira.providers.base import BaseProvider
 from mira.security.secrets_scan import scan_secrets
@@ -86,9 +93,23 @@ def _audit_stage(audit: list[dict], stage: str, before: list, after: list) -> No
     audit.extend(_audit_drop(c, stage) for c in before if id(c) not in kept)
 
 
+_REASON_FINDING_LIMIT = 5
+
+
+def _format_findings_for_reason(comments: list[ReviewComment]) -> str:
+    """Summarize findings for a confidence reason: ``Title (`path:line`)``."""
+    shown = comments[:_REASON_FINDING_LIMIT]
+    parts = [f"{c.title.strip() or 'issue'} (`{c.path}:{c.line}`)" for c in shown]
+    remaining = len(comments) - len(shown)
+    if remaining > 0:
+        parts.append(f"and {remaining} more")
+    return "; ".join(parts)
+
+
 def _clamp_confidence_to_findings(
     walkthrough: WalkthroughResult,
     comments: list[ReviewComment],
+    criteria: list[TicketCriterion] | None = None,
 ) -> None:
     """Tighten the walkthrough confidence score based on actual review findings.
 
@@ -104,21 +125,51 @@ def _clamp_confidence_to_findings(
     if cs is None:
         return
 
-    blockers = sum(1 for c in comments if c.severity == Severity.BLOCKER)
-    warnings = sum(1 for c in comments if c.severity == Severity.WARNING)
+    blocker_comments = [c for c in comments if c.severity == Severity.BLOCKER]
+    warning_comments = [c for c in comments if c.severity == Severity.WARNING]
+    unmet_criteria = [c for c in (criteria or []) if c.is_unmet]
+    blockers = len(blocker_comments)
+    warnings = len(warning_comments)
     original = cs.score
 
     if blockers > 0 and cs.score > 2:
         cs.score = 2
-        cs.label = "Do not merge"
+        cs.label = "Request changes"
         cs.reason = (
             f"Found {blockers} blocker{'s' if blockers != 1 else ''} "
-            "that must be fixed before merge."
+            f"that must be fixed before merge: {_format_findings_for_reason(blocker_comments)}."
+        )
+    elif unmet_criteria and cs.score > 2:
+        cs.score = 2
+        cs.label = "Request changes"
+        names = "; ".join(f'"{c.criterion}" (`{c.issue}`)' for c in unmet_criteria[:5])
+        cs.reason = (
+            f"{len(unmet_criteria)} linked-ticket requirement"
+            f"{'s' if len(unmet_criteria) != 1 else ''} not met: {names}."
         )
     elif warnings >= 3 and cs.score > 3:
         cs.score = 3
         cs.label = "Needs review"
-        cs.reason = f"Found {warnings} warnings that need attention before merge."
+        cs.reason = (
+            f"Found {warnings} warnings that need attention before merge: "
+            f"{_format_findings_for_reason(warning_comments)}."
+        )
+
+    # A score without a reason is the exact complaint this section exists to
+    # fix — always leave the reader something concrete to act on.
+    if not cs.reason.strip():
+        if unmet_criteria:
+            cs.reason = (
+                "Linked-ticket requirements not met: "
+                + "; ".join(f'"{c.criterion}"' for c in unmet_criteria[:5])
+                + "."
+            )
+        elif blocker_comments:
+            cs.reason = f"Blockers found: {_format_findings_for_reason(blocker_comments)}."
+        elif warning_comments:
+            cs.reason = f"Warnings found: {_format_findings_for_reason(warning_comments)}."
+        else:
+            cs.reason = "No blockers or warnings found in the changed code."
 
     if cs.score != original:
         logger.info(
@@ -524,6 +575,10 @@ class ReviewEngine:
         pr_info = await self.provider.get_pr_info(pr_url)
         self._pr_info = pr_info
 
+        # Tracker lookup runs alongside the review — it only needs the PR
+        # metadata, and a slow/unconfigured Linear must never delay the diff.
+        linked_issues_task = _asyncio.create_task(resolve_linked_issues(pr_info, self.config))
+
         async def _resolve_threads() -> tuple[
             int, int, list[UnresolvedThread], list[ThreadDecision]
         ]:
@@ -541,13 +596,17 @@ class ReviewEngine:
                 logger.warning("Thread resolution failed, continuing: %s", exc)
                 return 0, 0, [], []
 
-        thread_result, diff_text, linked_issue_context = await _asyncio.gather(
+        thread_result, diff_text = await _asyncio.gather(
             _resolve_threads(),
             self.provider.get_pr_diff(pr_info),
-            fetch_linear_context(pr_info),
         )
 
         threads_checked, llm_resolved, unresolved_threads, thread_decisions = thread_result
+
+        linked_issues = []
+        with contextlib.suppress(Exception):
+            linked_issues = await linked_issues_task
+        linked_issues_context = format_issues_context(linked_issues)
 
         _lines_changed = sum(
             1 for line in diff_text.splitlines() if line.startswith("+") or line.startswith("-")
@@ -606,6 +665,14 @@ class ReviewEngine:
         # Overlap detection keeps the full diff — its fingerprint must cover the
         # whole PR, not just the latest commits.
         full_diff_text = diff_text
+
+        # Grade the linked ticket's requirements against the whole PR (not the
+        # round-2 incremental slice) while the review runs.
+        ticket_task = None
+        if linked_issues and full_diff_text.strip():
+            ticket_task = _asyncio.create_task(
+                verify_ticket_criteria(self.llm, linked_issues, full_diff_text)
+            )
         if review_round >= 2 and pr_info.head_sha:
             try:
                 from mira.dashboard.api import _app_db
@@ -689,7 +756,7 @@ class ReviewEngine:
                 review_round=review_round,
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
-                linked_issue_context=linked_issue_context,
+                linked_issues_context=linked_issues_context,
             )
         except BaseException as exc:
             if overlap_task is not None:
@@ -749,6 +816,12 @@ class ReviewEngine:
             with contextlib.suppress(Exception):
                 overlaps = await overlap_task
 
+        ticket_criteria: list[TicketCriterion] = []
+        if ticket_task is not None:
+            with contextlib.suppress(Exception):
+                ticket_criteria = await ticket_task
+        result.ticket_criteria = ticket_criteria
+
         # Inline comments must anchor to lines in the PR's diff vs base, or
         # GitHub 422s them at posting time and the key-issues table ends up
         # naming findings with no inline attached. Drop them here and re-sync.
@@ -767,7 +840,9 @@ class ReviewEngine:
                     result.key_issues = _drop_orphan_key_issues(result.key_issues, kept)
 
         if result.walkthrough:
-            _clamp_confidence_to_findings(result.walkthrough, result.comments)
+            _clamp_confidence_to_findings(
+                result.walkthrough, result.comments, result.ticket_criteria
+            )
             if self.dry_run:
                 logger.info("Dry run: skipping walkthrough comment posting")
             else:
@@ -839,6 +914,12 @@ class ReviewEngine:
                         index_was_empty=getattr(self, "_index_was_empty", False),
                         dashboard_url=_os.environ.get("MIRA_DASHBOARD_URL", ""),
                         overlaps=overlaps or None,
+                        comments=result.comments,
+                        linked_issues=linked_issues or None,
+                        require_issue=self.config.linear.require_issue,
+                        additions=result.additions,
+                        deletions=result.deletions,
+                        ticket_criteria=result.ticket_criteria or None,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -869,23 +950,47 @@ class ReviewEngine:
             llm_resolved,
         )
 
-        result.linear_issue_ids = extract_linear_issue_identifiers(pr_info)
-        result.linear_issue_urls = re.findall(r"^- URL: (https?://\S+)", linked_issue_context, re.M)
-        if result.linear_issue_ids:
-            result.linear_lookup_status = "loaded" if linked_issue_context else "unavailable"
+        # Feed the review-body table (github._linear_review_value) from the
+        # issues we resolved, distinguishing "none referenced" from "lookup
+        # failed" so an unverifiable ticket reads as Unknown, not N/A.
+        referenced = issue_identifiers_for_pr(pr_info, self.config.linear.team_keys)
+        result.linear_issue_ids = [i.identifier for i in linked_issues] or referenced
+        result.linear_issue_urls = [i.url for i in linked_issues]
+        if linked_issues:
+            result.linear_lookup_status = "loaded"
+        elif referenced:
+            result.linear_lookup_status = "unavailable"
+        else:
+            result.linear_lookup_status = "not_linked"
+
+        verdict = derive_verdict(
+            result.comments,
+            result.walkthrough.confidence_score if result.walkthrough else None,
+            result.ticket_criteria,
+        )
+        request_changes = (
+            self.config.review.request_changes_on_blocker and verdict.label == "Request changes"
+        )
 
         posted_comment_ids: list[int] = []
-        if not result.comments and not result.summary:
+        if not result.comments and not result.summary and not request_changes:
             logger.info("No review content for PR %s", pr_info.url)
         elif self.dry_run:
             logger.info(
-                "Dry run: would post a review with %d inline comment(s) on PR %s",
+                "Dry run: would post a review with %d inline comment(s) on PR %s (verdict=%s)",
                 len(result.comments),
                 pr_info.url,
+                verdict.label,
             )
         else:
             posted_comment_ids = (
-                await self.provider.post_review(pr_info, result, bot_name=self.bot_name) or []
+                await self.provider.post_review(
+                    pr_info,
+                    result,
+                    bot_name=self.bot_name,
+                    request_changes=request_changes,
+                )
+                or []
             )
 
         result.thread_decisions = thread_decisions
@@ -1017,7 +1122,7 @@ class ReviewEngine:
         review_round: int = 1,
         resolved_threads: list[dict] | None = None,
         team_conventions: str = "",
-        linked_issue_context: str = "",
+        linked_issues_context: str = "",
     ) -> ReviewResult:
         """Core review pipeline.
 
@@ -1091,7 +1196,6 @@ class ReviewEngine:
                     config=self.config,
                     pr_title=pr_title,
                     pr_description=pr_description,
-                    linked_issue_context=linked_issue_context,
                 )
                 wt_raw = await self.llm.walkthrough(wt_messages)
                 wt_parsed = parse_walkthrough_response(wt_raw)
@@ -1305,7 +1409,7 @@ class ReviewEngine:
                         review_round=review_round,
                         resolved_threads=resolved_threads,
                         team_conventions=team_conventions,
-                        linked_issue_context=linked_issue_context,
+                        linked_issues_context=linked_issues_context,
                     )
 
                     def _parse(raw: str) -> tuple[list[ReviewComment], list[KeyIssue], str]:
@@ -1590,6 +1694,8 @@ class ReviewEngine:
             key_issues=all_key_issues,
             summary=summary,
             reviewed_files=len(filtered),
+            additions=sum(f.added_lines for f in filtered),
+            deletions=sum(f.deleted_lines for f in filtered),
             token_usage=self.llm.usage,
             walkthrough=walkthrough,
             reviewed_paths=selected_paths,

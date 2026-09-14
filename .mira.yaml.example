@@ -70,5 +70,23 @@ review:
   include_summary: true
   # Generate a PR walkthrough comment (top-level summary)
   walkthrough: true
-  # Include a Mermaid sequence diagram in the walkthrough
+  # Include a Mermaid flow diagram in the walkthrough
   walkthrough_sequence_diagram: true
+  # Character budget for the diff excerpts fed to the walkthrough so change
+  # descriptions are grounded in the actual code (0 = metadata only)
+  walkthrough_diff_budget: 40000
+  # Submit the review as "Request changes" (blocking merge) when the verdict is
+  # Request changes — a blocker, or an unmet acceptance criterion on a linked
+  # ticket. Set false to always post a plain comment.
+  request_changes_on_blocker: true
+
+linear:
+  # Link Linear issues referenced in the PR title/description/branch and give
+  # the reviewer the ticket's intent. Requires MIRA_LINEAR_TOKEN in the
+  # environment; without it the feature is silently off.
+  enabled: true
+  # Restrict lookups to these team keys (empty = any ABC-123-shaped token)
+  # team_keys:
+  #   - ENG
+  # Render a walkthrough note when a PR references no issue at all
+  require_issue: false
