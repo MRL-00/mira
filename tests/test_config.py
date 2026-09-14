@@ -204,6 +204,12 @@ class TestWalkthroughConfig:
         assert config.review.walkthrough_sequence_diagram is True
         assert config.review.walkthrough_diff_budget == 40_000
 
+    def test_request_changes_on_blocker_default(self):
+        config = load_config()
+        assert config.review.request_changes_on_blocker is True
+        config = load_config(overrides={"review.request_changes_on_blocker": False})
+        assert config.review.request_changes_on_blocker is False
+
 
 class TestLinearConfig:
     def test_defaults(self):

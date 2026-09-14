@@ -60,6 +60,7 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 - Bot chat: mention the bot on any PR or MR to ask questions
 - Cancel-in-progress indexing from the UI
 - **Linear issue linking** — detects `ENG-123`-style references in the PR title, description, and branch, gives the reviewer the ticket's intent to verify the change against, and links the issues in the walkthrough (`MIRA_LINEAR_TOKEN`)
+- **Ticket acceptance-criteria verification** — grades every requirement from a linked ticket (description, acceptance criteria, comments, sub-issues) against the PR diff, renders a per-criterion checklist, and forces a blocking "Request changes" review when any requirement is missed
 
 ## Bring your own LLM
 

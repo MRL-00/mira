@@ -194,6 +194,59 @@ SUBMIT_THREAD_REPLY_TOOL = {
 }
 
 
+SUBMIT_TICKET_VERIFICATION_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_ticket_verification",
+        "description": (
+            "Grade every requirement of the linked tracker ticket against the "
+            "pull request diff. Every requirement must appear exactly once."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "criteria": {
+                    "type": "array",
+                    "description": "One entry per requirement, in ticket order.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "issue": {
+                                "type": "string",
+                                "description": "Ticket identifier, e.g. ENG-482.",
+                            },
+                            "criterion": {
+                                "type": "string",
+                                "description": "The requirement, quoted or closely paraphrased.",
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["met", "unmet", "unclear"],
+                                "description": (
+                                    "met: the diff demonstrably satisfies this requirement. "
+                                    "unmet: the diff shows it was missed, done wrong, or not "
+                                    "implemented at all. unclear: the requirement cannot be "
+                                    "judged from the diff alone."
+                                ),
+                            },
+                            "evidence": {
+                                "type": "string",
+                                "description": (
+                                    "One short sentence citing the file:line or the missing "
+                                    "work that justifies the status."
+                                ),
+                            },
+                        },
+                        "required": ["issue", "criterion", "status", "evidence"],
+                    },
+                },
+            },
+            "required": ["criteria"],
+        },
+    },
+}
+
+
 SUBMIT_WALKTHROUGH_TOOL = {
     "type": "function",
     "function": {
