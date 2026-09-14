@@ -210,6 +210,13 @@ class TestWalkthroughConfig:
         config = load_config(overrides={"review.request_changes_on_blocker": False})
         assert config.review.request_changes_on_blocker is False
 
+    def test_check_run_defaults(self):
+        config = load_config()
+        assert config.review.check_run is True
+        assert config.review.check_name == "Mira Review"
+        config = load_config(overrides={"review.check_name": "Mira Code Review"})
+        assert config.review.check_name == "Mira Code Review"
+
 
 class TestLinearConfig:
     def test_defaults(self):

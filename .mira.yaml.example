@@ -79,6 +79,11 @@ review:
   # Request changes — a blocker, or an unmet acceptance criterion on a linked
   # ticket. Set false to always post a plain comment.
   request_changes_on_blocker: true
+  # Publish a GitHub check run for each review so Mira shows up in the PR's
+  # checks list and can be required by branch protection. Needs the GitHub
+  # App's "Checks: read and write" permission.
+  check_run: true
+  check_name: "Mira Review"
 
 linear:
   # Link Linear issues referenced in the PR title/description/branch and give
