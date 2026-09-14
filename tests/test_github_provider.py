@@ -389,6 +389,112 @@ class TestPostReviewRequestChanges:
         assert events == ["REQUEST_CHANGES", "COMMENT"]
 
 
+class TestPostCheckRun:
+    """Mira publishes a GitHub check run so it appears in the PR's checks list."""
+
+    def _provider(self, create_check_run):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        mock_commit = MagicMock()
+        mock_commit.create_check_run.side_effect = create_check_run
+        mock_repo = MagicMock()
+        mock_repo.get_commit.return_value = mock_commit
+        mock_gh = MagicMock()
+        mock_gh.get_repo.return_value = mock_repo
+        provider._github = mock_gh
+        return provider, mock_commit
+
+    def _pr(self) -> PRInfo:
+        return PRInfo(
+            title="Test",
+            description="desc",
+            base_branch="main",
+            head_branch="feat",
+            url="https://github.com/o/r/pull/1",
+            number=1,
+            owner="o",
+            repo="r",
+            head_sha="abc123",
+        )
+
+    @pytest.mark.asyncio
+    async def test_request_changes_fails_the_check(self):
+        calls: list[dict] = []
+        provider, _ = self._provider(lambda **kw: calls.append(kw))
+        result = ReviewResult(
+            comments=[
+                ReviewComment(
+                    path="a.py",
+                    line=1,
+                    end_line=None,
+                    severity=Severity.BLOCKER,
+                    category="bug",
+                    title="Broken",
+                    body="b",
+                    confidence=0.9,
+                )
+            ],
+            summary="Found blockers",
+        )
+        await provider.post_check_run(self._pr(), result, "Request changes")
+        assert calls[0]["name"] == "Mira Review"
+        assert calls[0]["head_sha"] == "abc123"
+        assert calls[0]["status"] == "completed"
+        assert calls[0]["conclusion"] == "failure"
+        assert "Request changes" in calls[0]["output"]["summary"]
+        assert "1 blocker" in calls[0]["output"]["summary"]
+
+    @pytest.mark.asyncio
+    async def test_clean_review_passes_the_check(self):
+        calls: list[dict] = []
+        provider, _ = self._provider(lambda **kw: calls.append(kw))
+        await provider.post_check_run(
+            self._pr(), ReviewResult(summary="All good"), "Looks good to merge"
+        )
+        assert calls[0]["conclusion"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_needs_review_is_neutral(self):
+        calls: list[dict] = []
+        provider, _ = self._provider(lambda **kw: calls.append(kw))
+        await provider.post_check_run(self._pr(), ReviewResult(summary="Warnings"), "Needs review")
+        assert calls[0]["conclusion"] == "neutral"
+
+    @pytest.mark.asyncio
+    async def test_check_output_includes_ticket_criteria(self):
+        from mira.models import TicketCriterion
+
+        calls: list[dict] = []
+        provider, _ = self._provider(lambda **kw: calls.append(kw))
+        result = ReviewResult(
+            summary="Missing requirement",
+            ticket_criteria=[TicketCriterion("ENG-1", "Cap retries", "unmet")],
+        )
+        await provider.post_check_run(self._pr(), result, "Request changes")
+        assert "Cap retries" in calls[0]["output"]["text"]
+        assert "\u274c" in calls[0]["output"]["text"]
+
+    @pytest.mark.asyncio
+    async def test_custom_check_name(self):
+        calls: list[dict] = []
+        provider, _ = self._provider(lambda **kw: calls.append(kw))
+        await provider.post_check_run(
+            self._pr(), ReviewResult(summary="x"), "Needs review", name="Mira Code Review"
+        )
+        assert calls[0]["name"] == "Mira Code Review"
+
+    @pytest.mark.asyncio
+    async def test_missing_permission_is_swallowed(self):
+        gh_403 = GithubException(status=403, data={"message": "Resource not accessible"})
+
+        def _raise(**kwargs):
+            raise gh_403
+
+        provider, _ = self._provider(_raise)
+        # Must not raise — a check run can never break a review.
+        await provider.post_check_run(self._pr(), ReviewResult(summary="x"), "Request changes")
+
+
 class TestPostReviewGracefulDegradation:
     """When GitHub returns 422 on the batch post (regardless of the
     specific reason — line-mismatch, vague 'internal error', etc.), the

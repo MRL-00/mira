@@ -165,6 +165,30 @@ class TestReviewEngine:
         mock_provider.post_review.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_posts_check_run_with_verdict(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """A GitHub check run is published with the derived verdict label."""
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        mock_provider.post_check_run.assert_awaited_once()
+        call = mock_provider.post_check_run.await_args
+        # The sample review files a blocker, so the verdict is "Request changes".
+        assert call.args[2] == "Request changes"
+        assert call.kwargs["name"] == "Mira Review"
+
+    @pytest.mark.asyncio
+    async def test_no_check_run_when_disabled(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        config = MiraConfig()
+        config.review.check_run = False
+        engine = ReviewEngine(config=config, llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+        mock_provider.post_check_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_posts_review_when_no_inline_comments(self, mock_provider: AsyncMock):
         llm = MagicMock(spec=LLMProvider)
         no_comments = json.dumps(

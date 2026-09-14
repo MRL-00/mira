@@ -993,6 +993,20 @@ class ReviewEngine:
                 or []
             )
 
+        # Publish a check run so Mira shows up in the PR's checks list (and can
+        # be required by branch protection). Best-effort — a host without a
+        # checks API, or a missing permission, must not affect the review.
+        if not self.dry_run and self.config.review.check_run:
+            try:
+                await self.provider.post_check_run(
+                    pr_info,
+                    result,
+                    verdict.label,
+                    name=self.config.review.check_name,
+                )
+            except Exception as exc:
+                logger.warning("Failed to post check run: %s", exc)
+
         result.thread_decisions = thread_decisions
 
         try:
