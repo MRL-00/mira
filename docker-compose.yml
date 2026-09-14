@@ -12,6 +12,8 @@ services:
       MIRA_GITHUB_APP_ID: ${MIRA_GITHUB_APP_ID}
       MIRA_GITHUB_PRIVATE_KEY: ${MIRA_GITHUB_PRIVATE_KEY}
       MIRA_INDEX_DIR: /data/indexes
+      MIRA_LINEAR_TOKEN: ${MIRA_LINEAR_TOKEN}
+      # Legacy name still accepted by the app so existing deployments keep working.
       MIRA_LINEAR_API_KEY: ${MIRA_LINEAR_API_KEY}
       MIRA_MODEL: deepseek/deepseek-v4-flash
       MIRA_WEBHOOK_SECRET: ${MIRA_WEBHOOK_SECRET}

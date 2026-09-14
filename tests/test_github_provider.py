@@ -17,6 +17,7 @@ from mira.models import (
     ReviewComment,
     ReviewResult,
     Severity,
+    TicketCriterion,
     WalkthroughConfidenceScore,
     WalkthroughEffort,
     WalkthroughFileEntry,
@@ -350,7 +351,17 @@ class TestPostReviewRequestChanges:
             return review
 
         provider, mock_pr = self._provider(create_review=_create_review)
-        result = ReviewResult(comments=[], summary="Ticket criterion unmet")
+        result = ReviewResult(
+            summary="Ticket criterion unmet",
+            ticket_criteria=[
+                TicketCriterion(
+                    issue="EPIC-1113",
+                    criterion="Readers honour autoPaidEnabled",
+                    status="unmet",
+                    evidence="no reader check in the handler",
+                )
+            ],
+        )
         await provider.post_review(_make_pr_info(), result, request_changes=True)
         assert len(calls) == 1
         assert calls[0]["event"] == "REQUEST_CHANGES"
@@ -516,7 +527,7 @@ class TestPostReviewGracefulDegradation:
                     path="a.py",
                     line=1,
                     end_line=None,
-                    severity=Severity.WARNING,
+                    severity=Severity.BLOCKER,
                     category="bug",
                     title="Issue",
                     body="desc",
@@ -668,22 +679,20 @@ class TestReviewVerdict:
         body, event = _review_body_and_event(result, commit)
 
         assert event == "APPROVE"
-        assert "| **About:** | Adds structured review output. |" in body
         assert "| **Tests Pass:** | Yes — 1 passed, 0 failed, 0 skipped, 0 pending |" in body
         assert "| **Includes Documentation:** | Yes — `docs/review.md` |" in body
         assert "| **Reviewed against Linear ticket and approved:** | Yes — [EPIC-948]" in body
         assert "| **Final verdict:** | APPROVE |" in body
-        assert "### Review coverage" in body
-        assert "**Files:** 2 reviewed of 2 changed files" in body
-        assert "**Confidence:** 5/5 — Safe to merge" in body
-        assert "### Change map" in body
-        assert 'pr["Pull request"]' in body
-        assert 'f0["src/app.py"]' in body
-        assert "<summary><b>Changed files</b></summary>" in body
-        assert "| Modified | `src/app.py` | Publishes richer review details. |" in body
         assert "No actionable findings survived Mira's evidence and self-critique checks." in body
+        # The walkthrough comment carries the summary, Mermaid map, and per-file
+        # detail; repeating them here made the review a second wall of text.
+        assert "### Review coverage" not in body
+        assert "### Change map" not in body
+        assert "<summary><b>Changed files</b></summary>" not in body
+        assert "| **About:** |" not in body
 
-    def test_clean_review_without_green_checks_is_comment(self):
+    def test_clean_review_is_approved_even_without_green_checks(self):
+        """CI status no longer decides the verdict — findings and the ticket do."""
         run = MagicMock(conclusion="skipped")
         commit = MagicMock()
         commit.get_check_runs.return_value = [run]
@@ -691,12 +700,31 @@ class TestReviewVerdict:
 
         body, event = _review_body_and_event(result, commit)
 
-        assert event == "COMMENT"
+        assert event == "APPROVE"
         assert "| **Tests Pass:** | No — 0 passed, 0 failed, 1 skipped, 0 pending |" in body
         assert "N/A — No linked Linear ticket found" in body
-        assert "| **Final verdict:** | COMMENT |" in body
+        assert "| **Final verdict:** | APPROVE |" in body
 
-    def test_warning_requests_changes(self):
+    def test_unverified_ticket_needs_review(self):
+        """A referenced ticket Mira could not read can never be an approval."""
+        commit = MagicMock()
+        commit.get_check_runs.return_value = []
+        result = ReviewResult(
+            summary="No issues found.",
+            linear_issue_ids=["EPIC-1113"],
+            linear_lookup_status="unavailable",
+            linear_lookup_detail="no Linear API key set (expected `MIRA_LINEAR_TOKEN`)",
+        )
+
+        body, event = _review_body_and_event(result, commit)
+
+        assert event == "COMMENT"
+        assert "| **Final verdict:** | COMMENT |" in body
+        assert "Unknown — Linear ticket could not be checked (EPIC-1113)" in body
+        assert "no Linear API key set" in body
+        assert "not an approval" in body
+
+    def test_warning_needs_review(self):
         run = MagicMock(conclusion="success")
         commit = MagicMock()
         commit.get_check_runs.return_value = [run]
@@ -720,9 +748,12 @@ class TestReviewVerdict:
 
         body, event = _review_body_and_event(result, commit)
 
-        assert event == "REQUEST_CHANGES"
+        # Warnings are advisory: the walkthrough derives "Needs review" rather
+        # than blocking the merge, so the review posts as a plain comment.
+        assert event == "COMMENT"
         assert "blocking review findings remain" in body
-        assert "| **Final verdict:** | REQUEST_CHANGES |" in body
+        assert "1 actionable finding attached inline." in body
+        assert "| **Final verdict:** | COMMENT |" in body
 
     @pytest.mark.asyncio
     async def test_posts_review_without_inline_comments(self):
@@ -741,9 +772,9 @@ class TestReviewVerdict:
 
         pr.create_review.assert_called_once()
         kwargs = pr.create_review.call_args.kwargs
-        assert kwargs["event"] == "COMMENT"
+        assert kwargs["event"] == "APPROVE"
         assert kwargs["comments"] == []
-        assert "| **Final verdict:** | COMMENT |" in kwargs["body"]
+        assert "| **Final verdict:** | APPROVE |" in kwargs["body"]
 
 
 class TestFormatCommentBody:

@@ -17,6 +17,9 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from mira.exceptions import ProviderError
 from mira.models import (
+    VERDICT_APPROVE,
+    VERDICT_NEEDS_REVIEW,
+    VERDICT_REQUEST_CHANGES,
     BotThreadRecord,
     FileHistoryEntry,
     HumanReviewComment,
@@ -26,6 +29,8 @@ from mira.models import (
     ReviewResult,
     Severity,
     UnresolvedThread,
+    derive_review_verdict,
+    ticket_unverified_note,
 )
 from mira.providers.base import BaseProvider
 
@@ -81,16 +86,23 @@ def _documentation_paths(paths: list[str]) -> list[str]:
 def _github_checks(commit: Any) -> tuple[str, str, bool]:
     try:
         runs = list(commit.get_check_runs())
-    except Exception:
+    except Exception as exc:
+        status = getattr(exc, "status", None)
+        logger.warning("Could not read GitHub check runs (status=%s): %s", status, exc)
+        hint = (
+            "the Mira GitHub App needs the 'Checks: read' permission"
+            if status in (403, 404)
+            else "the checks API was unavailable"
+        )
         return (
-            "Not run — Mira does not execute repository commands; GitHub checks could not be read.",
+            f"Not run — Mira does not run your test suite; GitHub checks could not be read ({hint}).",
             "Unknown",
             False,
         )
 
     if not runs:
         return (
-            "Not run — Mira does not execute repository commands and no GitHub checks were found.",
+            "Not run — Mira does not run your test suite and no GitHub checks were reported.",
             "Not run — no GitHub checks found",
             False,
         )
@@ -117,9 +129,17 @@ def _github_checks(commit: Any) -> tuple[str, str, bool]:
 # (blockers or unmet ticket criteria) fails the check so branch protection can
 # require it; "Needs review" is neutral; a clean review passes.
 _CHECK_CONCLUSION: dict[str, str] = {
-    "Request changes": "failure",
-    "Needs review": "neutral",
-    "Looks good to merge": "success",
+    VERDICT_REQUEST_CHANGES: "failure",
+    VERDICT_NEEDS_REVIEW: "neutral",
+    VERDICT_APPROVE: "success",
+}
+
+# Maps the same verdict to the GitHub review event, so the review Mira posts
+# reports the verdict its walkthrough and check run already state.
+_REVIEW_EVENT: dict[str, str] = {
+    VERDICT_REQUEST_CHANGES: "REQUEST_CHANGES",
+    VERDICT_NEEDS_REVIEW: "COMMENT",
+    VERDICT_APPROVE: "APPROVE",
 }
 
 _CRITERION_GLYPH: dict[str, str] = {"met": "\u2705", "unmet": "\u274c", "unclear": "\u26a0\ufe0f"}
@@ -142,6 +162,9 @@ def _check_summary(result: ReviewResult, verdict_label: str) -> str:
         lines.append(", ".join(stats).capitalize() + ".")
     if result.summary:
         lines.append(result.summary)
+    note = ticket_unverified_note(result)
+    if note:
+        lines.append(note)
     return "\n\n".join(lines)[:65000]
 
 
@@ -163,12 +186,14 @@ def _check_text(result: ReviewResult) -> str:
 
 
 def _linear_review_value(result: ReviewResult) -> tuple[str, bool]:
+    """Ticket row for the review table: rendered value + whether it verified."""
     if result.linear_lookup_status == "not_linked":
         return "N/A — No linked Linear ticket found", True
     if result.linear_lookup_status != "loaded":
         identifiers = ", ".join(result.linear_issue_ids)
         suffix = f" ({identifiers})" if identifiers else ""
-        return f"Unknown — Linear ticket could not be checked{suffix}", False
+        reason = f" — {result.linear_lookup_detail}" if result.linear_lookup_detail else ""
+        return f"Unknown — Linear ticket could not be checked{suffix}{reason}", False
 
     links: list[str] = []
     for index, identifier in enumerate(result.linear_issue_ids):
@@ -189,135 +214,64 @@ def _linear_review_value(result: ReviewResult) -> tuple[str, bool]:
     )
     if has_blocking_findings:
         return f"No — {linked}; blocking review findings remain", False
-    return f"Yes — {linked}", True
-
-
-def _markdown_cell(value: str) -> str:
-    return _table_value(value).replace("`", "&#96;")
-
-
-def _change_map(result: ReviewResult) -> str:
-    if result.walkthrough is None or not result.walkthrough.file_changes:
-        return ""
-
-    entries = result.walkthrough.file_changes[:12]
-    group_ids: dict[str, str] = {}
-    lines = ["flowchart LR", '  pr["Pull request"]']
-    for index, entry in enumerate(entries):
-        group = entry.group.strip() or "Changed files"
-        if group not in group_ids:
-            group_id = f"g{len(group_ids)}"
-            group_ids[group] = group_id
-            safe_group = " ".join(group.split()).replace('"', "'")
-            lines.append(f'  {group_id}["{safe_group}"]')
-            lines.append(f"  pr --> {group_id}")
-        file_id = f"f{index}"
-        safe_path = entry.path.replace('"', "'")
-        lines.append(f'  {file_id}["{safe_path}"]')
-        lines.append(f"  {group_ids[group]} --> {file_id}")
-    if result.walkthrough.file_changes[12:]:
-        remaining = len(result.walkthrough.file_changes) - 12
-        lines.append(f'  more["+{remaining} more files"]')
-        lines.append("  pr --> more")
-    return "\n".join(lines)
-
-
-def _review_details(result: ReviewResult) -> list[str]:
-    lines = ["", "### Review coverage", ""]
-    total = len(result.total_paths)
-    reviewed = result.reviewed_files or len(result.reviewed_paths)
-    coverage = f"{reviewed} reviewed"
+    total = len(result.ticket_criteria)
     if total:
-        coverage += f" of {total} changed files"
-    lines.append(f"- **Files:** {coverage}")
-    lines.append(f"- **Inline findings:** {len(result.comments)}")
-    if result.skipped_paths:
-        lines.append(f"- **Skipped:** {len(result.skipped_paths)} files")
-    else:
-        lines.append("- **Skipped:** None")
-
-    walkthrough = result.walkthrough
-    if walkthrough is not None and walkthrough.confidence_score is not None:
-        confidence = walkthrough.confidence_score
-        label = f" — {confidence.label}" if confidence.label else ""
-        lines.append(f"- **Confidence:** {confidence.score}/5{label}")
-        if confidence.reason:
-            lines.append(f"- **Confidence basis:** {_table_value(confidence.reason)}")
-    if walkthrough is not None and walkthrough.effort is not None:
-        effort = walkthrough.effort
-        lines.append(
-            f"- **Estimated human review effort:** {effort.minutes} minutes ({effort.label})"
-        )
-
-    diagram = _change_map(result)
-    if diagram:
-        lines.extend(("", "### Change map", "", "```mermaid", diagram, "```"))
-
-    if walkthrough is not None and walkthrough.file_changes:
-        lines.extend(
-            (
-                "",
-                "<details>",
-                "<summary><b>Changed files</b></summary>",
-                "",
-                "| Change | File | What changed |",
-                "| --- | --- | --- |",
-            )
-        )
-        for entry in walkthrough.file_changes[:20]:
-            change = entry.change_type.value.title()
-            description = _markdown_cell(entry.description or "No description generated.")
-            lines.append(f"| {change} | `{entry.path}` | {description} |")
-        if len(walkthrough.file_changes) > 20:
-            lines.append(
-                f"| — | _{len(walkthrough.file_changes) - 20} additional files_ | See the PR diff. |"
-            )
-        lines.extend(("", "</details>"))
-
-    lines.extend(("", "### Review outcome", ""))
-    if result.comments:
-        lines.append(f"{len(result.comments)} actionable finding(s) are attached inline.")
-    else:
-        lines.append("No actionable findings survived Mira's evidence and self-critique checks.")
-    if result.summary and result.summary != "No issues found.":
-        lines.extend(("", result.summary))
-    return lines
+        return f"Yes — {linked}; all {total} acceptance criteria met", True
+    return f"Yes — {linked}; no explicit acceptance criteria in the ticket", True
 
 
-def _review_body_and_event(result: ReviewResult, commit: Any) -> tuple[str, str]:
-    tests, tests_pass, checks_green = _github_checks(commit)
-    linear_value, linear_approved = _linear_review_value(result)
+def _review_body_and_event(
+    result: ReviewResult,
+    commit: Any,
+    verdict_label: str | None = None,
+    request_changes: bool | None = None,
+) -> tuple[str, str]:
+    """The review's status card and the GitHub event to post it with.
+
+    Deliberately narrow: the walkthrough comment already carries the summary,
+    the verdict rationale, the Mermaid change map, and the per-file detail.
+    Repeating them here produced a second near-identical wall of text, so this
+    body keeps only what the walkthrough does not say — CI status, docs, ticket
+    verification, and the verdict row — plus the inline-findings pointer.
+
+    The verdict comes from the engine (``derive_review_verdict``), the same
+    value the walkthrough headline and the check run use, so the three surfaces
+    can never disagree.
+    """
+    tests, tests_pass, _checks_green = _github_checks(commit)
+    linear_value, _linear_approved = _linear_review_value(result)
     docs = _documentation_paths(result.total_paths)
     docs_value = f"Yes — {', '.join(f'`{path}`' for path in docs)}" if docs else "No"
-    has_blocking_findings = any(
-        comment.severity in {Severity.BLOCKER, Severity.WARNING} for comment in result.comments
-    )
-    unmet_criteria = any(c.is_unmet for c in result.ticket_criteria)
-    if has_blocking_findings or unmet_criteria:
-        verdict = "REQUEST_CHANGES"
-    elif checks_green and linear_approved:
-        verdict = "APPROVE"
-    else:
-        verdict = "COMMENT"
 
-    about = result.walkthrough.summary if result.walkthrough is not None else ""
-    if not about:
-        about = result.summary or "Review completed."
+    if verdict_label is None:
+        verdict_label = derive_review_verdict(result).label
+    event = _REVIEW_EVENT.get(verdict_label, "COMMENT")
+    if event == "REQUEST_CHANGES" and request_changes is False:
+        # Config keeps Mira advisory even when it found blockers.
+        event = "COMMENT"
 
     rows = [
-        ("**About:**", about),
         ("**Tests:**", tests),
         ("**Tests Pass:**", tests_pass),
         ("**Includes Documentation:**", docs_value),
         ("**Reviewed against Linear ticket and approved:**", linear_value),
-        ("**Final verdict:**", verdict),
+        ("**Final verdict:**", event),
     ]
     lines = ["| Field | Value |", "| --- | --- |"]
     lines.extend(f"| {field} | {_table_value(value)} |" for field, value in rows)
-    lines.extend(_review_details(result))
+
+    lines.extend(("", "### Review outcome", ""))
+    if result.comments:
+        count = len(result.comments)
+        lines.append(f"{count} actionable finding{'s' if count != 1 else ''} attached inline.")
+    else:
+        lines.append("No actionable findings survived Mira's evidence and self-critique checks.")
+        note = ticket_unverified_note(result)
+        if note:
+            lines.append("")
+            lines.append(f"> {note}")
     if result.key_issues:
         lines.append(_format_key_issues(result.key_issues))
-    event = {"APPROVE": "APPROVE", "REQUEST_CHANGES": "REQUEST_CHANGES"}.get(verdict, "COMMENT")
     return "\n".join(lines), event
 
 
@@ -670,7 +624,8 @@ class GitHubProvider(BaseProvider):
         pr_info: PRInfo,
         result: ReviewResult,
         bot_name: str = "miracodeai",
-        request_changes: bool = False,
+        request_changes: bool | None = None,
+        verdict_label: str | None = None,
     ) -> list[int]:
         # Post when there is anything to say: inline findings, a summary body
         # (deploy-branch behaviour), or a blocking "Request changes" verdict
@@ -705,11 +660,12 @@ class GitHubProvider(BaseProvider):
             if not commits:
                 raise ProviderError("PR has no commits")
             latest_commit = commits[-1]
-            review_body, review_event = _review_body_and_event(result, latest_commit)
-            # An unmet linked-ticket criterion (or a blocker) blocks the merge
-            # even when the summary table would otherwise only comment.
-            if request_changes:
-                review_event = "REQUEST_CHANGES"
+            review_body, review_event = _review_body_and_event(
+                result,
+                latest_commit,
+                verdict_label=verdict_label,
+                request_changes=request_changes,
+            )
 
             # GitHub comment IDs aligned to result.comments (0 = unknown).
             ids = [0] * len(result.comments)

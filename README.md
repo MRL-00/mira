@@ -100,7 +100,7 @@ MIRA_GITHUB_APP_ID=123456
 MIRA_GITHUB_PRIVATE_KEY="$(cat private-key.pem)"
 MIRA_WEBHOOK_SECRET=your-secret
 OPENROUTER_API_KEY=sk-or-...
-MIRA_LINEAR_API_KEY=lin_api-...
+MIRA_LINEAR_TOKEN=lin_api_...
 ```
 
 ```bash
@@ -109,9 +109,14 @@ docker run -p 8000:8000 --env-file .env \
   ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
 ```
 
-`MIRA_LINEAR_API_KEY` is optional. A [read-only personal API key](https://linear.app/settings/api)
+`MIRA_LINEAR_TOKEN` is optional. A [read-only personal API key](https://linear.app/settings/api)
 enriches reviews with the description, acceptance criteria, metadata, and latest discussion from
-Linear issues referenced in the pull request title, description, or branch name.
+Linear issues referenced in the pull request title, description, or branch name, and grades every
+acceptance criterion against the diff.
+`MIRA_LINEAR_API_KEY` is still read as a fallback so older deployments keep working.
+
+Grant the GitHub App **Checks: read and write** so Mira can publish a check run (and read your CI
+status). Without it the check run is skipped and the review's Tests row reads "Unknown".
 
 **2. Install the app** on your repos — every PR gets reviewed.
 

@@ -269,7 +269,8 @@ class ForgejoProvider(BaseProvider):
         pr_info: PRInfo,
         result: ReviewResult,
         bot_name: str = "miracodeai",
-        request_changes: bool = False,
+        request_changes: bool | None = None,
+        verdict_label: str | None = None,
     ) -> None:
         # Forgejo review states are best-effort; the verdict is carried by the
         # walkthrough comment.

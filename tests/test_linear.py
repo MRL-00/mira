@@ -168,7 +168,8 @@ class TestLinearClient:
             "AsyncClient",
             lambda *a, **k: _FakeAsyncClient({"ENG-1": _FakeResponse(_issue_payload("ENG-1"))}),
         )
-        issues = await LinearClient("key").fetch_issues(["ENG-1"])
+        issues, errors = await LinearClient("key").fetch_issues(["ENG-1"])
+        assert errors == []
         assert len(issues) == 1
         issue = issues[0]
         assert issue.identifier == "ENG-1"
@@ -186,39 +187,83 @@ class TestLinearClient:
         assert issue.comments == ["Matt: Ship before Friday"]
         assert issue.children == ["ENG-483: Emit retry metrics (Todo)"]
 
-    async def test_skips_unknown_issue(self, monkeypatch: pytest.MonkeyPatch):
+    async def test_reports_unknown_issue(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(linear_mod.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient({}))
-        assert await LinearClient("key").fetch_issues(["ENG-404"]) == []
+        issues, errors = await LinearClient("key").fetch_issues(["ENG-404"])
+        assert issues == []
+        assert errors == ["ENG-404 not found (or not visible to this API key)"]
 
-    async def test_http_error_is_swallowed(self, monkeypatch: pytest.MonkeyPatch):
+    async def test_reports_http_error(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(
             linear_mod.httpx,
             "AsyncClient",
             lambda *a, **k: _FakeAsyncClient({"ENG-1": _FakeResponse({}, error=True)}),
         )
-        assert await LinearClient("key").fetch_issues(["ENG-1"]) == []
+        issues, errors = await LinearClient("key").fetch_issues(["ENG-1"])
+        assert issues == []
+        assert errors and "ENG-1" in errors[0]
+
+    async def test_reports_graphql_error(self, monkeypatch: pytest.MonkeyPatch):
+        """A 200 response carrying GraphQL errors must not read as "not found"."""
+        monkeypatch.setattr(
+            linear_mod.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient(
+                {"ENG-1": _FakeResponse({"errors": [{"message": "Access denied"}]})}
+            ),
+        )
+        issues, errors = await LinearClient("key").fetch_issues(["ENG-1"])
+        assert issues == []
+        assert errors == ["ENG-1: Access denied"]
 
 
 class TestResolveLinkedIssues:
-    async def test_no_key_returns_empty(self, monkeypatch: pytest.MonkeyPatch):
+    def _clear_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MIRA_LINEAR_TOKEN", raising=False)
-        assert await resolve_linked_issues(_pr(title="ENG-1"), MiraConfig()) == []
+        monkeypatch.delenv("MIRA_LINEAR_API_KEY", raising=False)
 
-    async def test_disabled_returns_empty(self, monkeypatch: pytest.MonkeyPatch):
+    async def test_no_key_reports_reason(self, monkeypatch: pytest.MonkeyPatch):
+        self._clear_keys(monkeypatch)
+        lookup = await resolve_linked_issues(_pr(title="ENG-1"), MiraConfig())
+        assert lookup.issues == []
+        assert lookup.status == "unavailable"
+        assert lookup.identifiers == ["ENG-1"]
+        assert "MIRA_LINEAR_TOKEN" in lookup.detail
+
+    async def test_legacy_api_key_env_is_used(self, monkeypatch: pytest.MonkeyPatch):
+        """The shipped docker-compose passed MIRA_LINEAR_API_KEY — keep honoring it."""
+        self._clear_keys(monkeypatch)
+        monkeypatch.setenv("MIRA_LINEAR_API_KEY", "key")
+        monkeypatch.setattr(
+            linear_mod.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeAsyncClient({"ENG-1": _FakeResponse(_issue_payload("ENG-1"))}),
+        )
+        lookup = await resolve_linked_issues(_pr(title="ENG-1"), MiraConfig())
+        assert lookup.status == "loaded"
+        assert [i.identifier for i in lookup.issues] == ["ENG-1"]
+
+    async def test_disabled_reports_reason(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MIRA_LINEAR_TOKEN", "key")
         config = MiraConfig()
         config.linear.enabled = False
-        assert await resolve_linked_issues(_pr(title="ENG-1"), config) == []
+        lookup = await resolve_linked_issues(_pr(title="ENG-1"), config)
+        assert lookup.issues == []
+        assert lookup.status == "unavailable"
+        assert "disabled" in lookup.detail
 
-    async def test_no_identifier_returns_empty(self, monkeypatch: pytest.MonkeyPatch):
+    async def test_no_identifier_is_not_linked(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MIRA_LINEAR_TOKEN", "key")
-        assert await resolve_linked_issues(_pr(title="no ticket here"), MiraConfig()) == []
+        lookup = await resolve_linked_issues(_pr(title="no ticket here"), MiraConfig())
+        assert lookup.issues == []
+        assert lookup.status == "not_linked"
 
     async def test_malformed_config_returns_empty(self):
         from unittest.mock import MagicMock
 
         # A misconfigured/duck-typed config object must not raise.
-        assert await resolve_linked_issues(_pr(title="ENG-1"), MagicMock()) == []
+        lookup = await resolve_linked_issues(_pr(title="ENG-1"), MagicMock())
+        assert lookup.issues == []
 
     async def test_fetches_referenced_issue(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("MIRA_LINEAR_TOKEN", "key")
@@ -227,8 +272,17 @@ class TestResolveLinkedIssues:
             "AsyncClient",
             lambda *a, **k: _FakeAsyncClient({"ENG-7": _FakeResponse(_issue_payload("ENG-7"))}),
         )
-        issues = await resolve_linked_issues(_pr(title="ENG-7: do it"), MiraConfig())
-        assert [i.identifier for i in issues] == ["ENG-7"]
+        lookup = await resolve_linked_issues(_pr(title="ENG-7: do it"), MiraConfig())
+        assert lookup.status == "loaded"
+        assert lookup.identifiers == ["ENG-7"]
+        assert [i.identifier for i in lookup.issues] == ["ENG-7"]
+
+    async def test_unreadable_ticket_reports_reason(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("MIRA_LINEAR_TOKEN", "key")
+        monkeypatch.setattr(linear_mod.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient({}))
+        lookup = await resolve_linked_issues(_pr(title="ENG-1113"), MiraConfig())
+        assert lookup.status == "unavailable"
+        assert "ENG-1113" in lookup.detail
 
 
 class TestFormatIssuesContext:

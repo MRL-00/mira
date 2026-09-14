@@ -35,8 +35,8 @@ from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
 from mira.linear import (
+    LinearLookup,
     format_issues_context,
-    issue_identifiers_for_pr,
     resolve_linked_issues,
 )
 from mira.llm.prompts.review import (
@@ -50,9 +50,11 @@ from mira.llm.response_parser import (
     parse_walkthrough_response,
 )
 from mira.models import (
+    VERDICT_REQUEST_CHANGES,
     WALKTHROUGH_MARKER,
     FileChangeType,
     KeyIssue,
+    LinkedIssue,
     OverlapFinding,
     PRFingerprint,
     PRInfo,
@@ -65,7 +67,8 @@ from mira.models import (
     UnresolvedThread,
     WalkthroughResult,
     build_review_stats,
-    derive_verdict,
+    derive_review_verdict,
+    ticket_unverified_note,
 )
 from mira.providers.base import BaseProvider
 from mira.security.secrets_scan import scan_secrets
@@ -603,9 +606,11 @@ class ReviewEngine:
 
         threads_checked, llm_resolved, unresolved_threads, thread_decisions = thread_result
 
-        linked_issues = []
+        linked_issues: list[LinkedIssue] = []
+        linear_lookup = LinearLookup()
         with contextlib.suppress(Exception):
-            linked_issues = await linked_issues_task
+            linear_lookup = await linked_issues_task
+            linked_issues = linear_lookup.issues
         linked_issues_context = format_issues_context(linked_issues)
 
         _lines_changed = sum(
@@ -839,10 +844,31 @@ class ReviewEngine:
                 if result.key_issues:
                     result.key_issues = _drop_orphan_key_issues(result.key_issues, kept)
 
+        # Feed the review-body table and the verdict from the resolved lookup,
+        # distinguishing "no ticket referenced" from "referenced but unreadable"
+        # so an unverifiable ticket reads as Unknown (with the reason) instead of
+        # silently passing, or as N/A when the PR links no ticket at all.
+        result.linear_issue_ids = [i.identifier for i in linked_issues] or linear_lookup.identifiers
+        result.linear_issue_urls = [i.url for i in linked_issues]
+        result.linear_lookup_status = linear_lookup.status
+        result.linear_lookup_detail = linear_lookup.detail
+
+        # One verdict for the whole review. Computed here, after confidence is
+        # clamped to the findings that survived, so the walkthrough headline,
+        # the review-body row, the posted review event, and the check run all
+        # report the same thing.
         if result.walkthrough:
             _clamp_confidence_to_findings(
                 result.walkthrough, result.comments, result.ticket_criteria
             )
+        verdict = derive_review_verdict(result)
+        verdict_note = ticket_unverified_note(result)
+        request_changes = (
+            self.config.review.request_changes_on_blocker
+            and verdict.label == VERDICT_REQUEST_CHANGES
+        )
+
+        if result.walkthrough:
             if self.dry_run:
                 logger.info("Dry run: skipping walkthrough comment posting")
             else:
@@ -920,6 +946,8 @@ class ReviewEngine:
                         additions=result.additions,
                         deletions=result.deletions,
                         ticket_criteria=result.ticket_criteria or None,
+                        verdict=verdict,
+                        verdict_note=verdict_note,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -950,28 +978,6 @@ class ReviewEngine:
             llm_resolved,
         )
 
-        # Feed the review-body table (github._linear_review_value) from the
-        # issues we resolved, distinguishing "none referenced" from "lookup
-        # failed" so an unverifiable ticket reads as Unknown, not N/A.
-        referenced = issue_identifiers_for_pr(pr_info, self.config.linear.team_keys)
-        result.linear_issue_ids = [i.identifier for i in linked_issues] or referenced
-        result.linear_issue_urls = [i.url for i in linked_issues]
-        if linked_issues:
-            result.linear_lookup_status = "loaded"
-        elif referenced:
-            result.linear_lookup_status = "unavailable"
-        else:
-            result.linear_lookup_status = "not_linked"
-
-        verdict = derive_verdict(
-            result.comments,
-            result.walkthrough.confidence_score if result.walkthrough else None,
-            result.ticket_criteria,
-        )
-        request_changes = (
-            self.config.review.request_changes_on_blocker and verdict.label == "Request changes"
-        )
-
         posted_comment_ids: list[int] = []
         if not result.comments and not result.summary and not request_changes:
             logger.info("No review content for PR %s", pr_info.url)
@@ -989,6 +995,7 @@ class ReviewEngine:
                     result,
                     bot_name=self.bot_name,
                     request_changes=request_changes,
+                    verdict_label=verdict.label,
                 )
                 or []
             )

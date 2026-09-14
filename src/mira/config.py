@@ -317,6 +317,9 @@ class LinearConfig(BaseModel):
     enabled: bool = True
     # Env var holding the Linear personal API key. Deployment-only.
     api_key_env: str = "MIRA_LINEAR_TOKEN"
+    # Older docs and the shipped docker-compose used ``MIRA_LINEAR_API_KEY``;
+    # keep reading it so an existing deployment's key keeps working.
+    api_key_env_fallbacks: list[str] = Field(default_factory=lambda: ["MIRA_LINEAR_API_KEY"])
     # Linear GraphQL endpoint. Deployment-only.
     api_url: str = "https://api.linear.app/graphql"
     # Only treat identifiers with these team keys as issues; empty = accept any
@@ -385,7 +388,7 @@ _DEPLOYMENT_ONLY_LLM_KEYS = frozenset(
 # Credential/endpoint settings a repository-controlled `.mira.yaml` must not
 # override: an untrusted repo could otherwise redirect the Linear key to an
 # attacker-controlled host.
-_DEPLOYMENT_ONLY_LINEAR_KEYS = frozenset({"api_key_env", "api_url"})
+_DEPLOYMENT_ONLY_LINEAR_KEYS = frozenset({"api_key_env", "api_key_env_fallbacks", "api_url"})
 
 
 def _strip_deployment_only_settings(overlay: dict[str, Any]) -> dict[str, Any]:

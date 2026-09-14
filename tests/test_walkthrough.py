@@ -13,17 +13,23 @@ from mira.llm.response_parser import (
     parse_walkthrough_response,
 )
 from mira.models import (
+    VERDICT_NEEDS_REVIEW,
     WALKTHROUGH_MARKER,
     FileChangeType,
     FileDiff,
     HunkInfo,
     ReviewComment,
+    ReviewResult,
     Severity,
+    TicketCriterion,
+    Verdict,
     WalkthroughConfidenceScore,
     WalkthroughEffort,
     WalkthroughFileEntry,
     WalkthroughResult,
     build_review_stats,
+    derive_review_verdict,
+    ticket_unverified_note,
 )
 
 
@@ -528,6 +534,16 @@ class TestWalkthroughToMarkdown:
         md = result.to_markdown(failure_notice="boom")
         assert "## Verdict:" not in md
 
+    def test_passed_verdict_and_note_render(self):
+        """An engine-derived verdict plus its reason drives the headline."""
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            verdict=Verdict(label=VERDICT_NEEDS_REVIEW, emoji="\u26a0\ufe0f"),
+            verdict_note="Could not read EPIC-1113 — no Linear API key set.",
+        )
+        assert "## Verdict: \u26a0\ufe0f Needs review" in md
+        assert "> Could not read EPIC-1113 — no Linear API key set." in md
+
     def test_optional_suggestions_collapsed(self):
         result = WalkthroughResult(summary="Changes.")
         md = result.to_markdown(comments=[self._comment(Severity.SUGGESTION)])
@@ -699,6 +715,60 @@ class TestWalkthroughToMarkdown:
         md = result.to_markdown()
         assert "### Changes" not in md
         assert "| File |" not in md
+
+
+class TestDeriveReviewVerdict:
+    """The one verdict shared by the walkthrough, review body, and check run."""
+
+    def _blocker(self) -> ReviewComment:
+        return ReviewComment(
+            path="a.py",
+            line=1,
+            end_line=None,
+            severity=Severity.BLOCKER,
+            category="bug",
+            title="Boom",
+            body="b",
+            confidence=0.9,
+        )
+
+    def test_clean_review_approves(self):
+        assert derive_review_verdict(ReviewResult(summary="ok")).label == "Looks good to merge"
+
+    def test_unmet_criterion_requests_changes(self):
+        result = ReviewResult(
+            ticket_criteria=[TicketCriterion("EPIC-1", "Do the thing", "unmet", "missing")]
+        )
+        assert derive_review_verdict(result).label == "Request changes"
+
+    def test_unverified_ticket_downgrades_approval(self):
+        result = ReviewResult(
+            summary="ok",
+            linear_issue_ids=["EPIC-1113"],
+            linear_lookup_status="unavailable",
+            linear_lookup_detail="no Linear API key set",
+        )
+        verdict = derive_review_verdict(result)
+        assert verdict.label == VERDICT_NEEDS_REVIEW
+        assert "EPIC-1113" in ticket_unverified_note(result)
+        assert "no Linear API key set" in ticket_unverified_note(result)
+
+    def test_unverified_ticket_keeps_blocking_verdict(self):
+        """A blocker already blocks; the ticket note must not soften it."""
+        result = ReviewResult(
+            comments=[self._blocker()],
+            linear_lookup_status="unavailable",
+        )
+        assert derive_review_verdict(result).label == "Request changes"
+
+    def test_loaded_ticket_is_not_downgraded(self):
+        result = ReviewResult(
+            summary="ok",
+            linear_issue_ids=["EPIC-1113"],
+            linear_lookup_status="loaded",
+        )
+        assert derive_review_verdict(result).label == "Looks good to merge"
+        assert ticket_unverified_note(result) == ""
 
 
 class TestBuildReviewStats:

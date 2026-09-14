@@ -168,6 +168,13 @@ _VERDICT_LIST_LIMIT = 10
 # Cap the collapsed "What changed" list so a very large PR stays skimmable.
 _CHANGES_DISPLAY_LIMIT = 15
 
+# Canonical verdict labels. The walkthrough headline, the review-body verdict
+# row, the posted review event, and the GitHub check-run conclusion all key off
+# these, so one review can never show two different verdicts.
+VERDICT_APPROVE = "Looks good to merge"
+VERDICT_NEEDS_REVIEW = "Needs review"
+VERDICT_REQUEST_CHANGES = "Request changes"
+
 
 def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
     """Format severity counts as a parenthetical breakdown, e.g. ' (1 blocker, 2 warnings)'."""
@@ -249,11 +256,11 @@ def derive_verdict(
     unmet = [c for c in (criteria or []) if c.is_unmet]
 
     if blockers or unmet:
-        label, emoji = "Request changes", "\U0001f6d1"
+        label, emoji = VERDICT_REQUEST_CHANGES, "\U0001f6d1"
     elif warnings or (confidence_score is not None and confidence_score.score <= 2):
-        label, emoji = "Needs review", "\u26a0\ufe0f"
+        label, emoji = VERDICT_NEEDS_REVIEW, "\u26a0\ufe0f"
     else:
-        label, emoji = "Looks good to merge", "\u2705"
+        label, emoji = VERDICT_APPROVE, "\u2705"
 
     return Verdict(
         label=label,
@@ -262,6 +269,34 @@ def derive_verdict(
         warnings=warnings,
         optional=optional,
         unmet_criteria=unmet,
+    )
+
+
+def derive_review_verdict(result: ReviewResult) -> Verdict:
+    """The single verdict every surface reports for a finished review.
+
+    Findings decide it first. A linked ticket Mira could not read is the one
+    other blocker: the ticket's acceptance criteria are part of what was asked
+    for, so an unverifiable ticket can never be approved — it downgrades an
+    otherwise-clean review to "Needs review" with the reason shown, instead of
+    silently reporting a bare "no findings".
+    """
+    confidence = result.walkthrough.confidence_score if result.walkthrough else None
+    verdict = derive_verdict(result.comments, confidence, result.ticket_criteria)
+    if not verdict.has_findings and result.linear_lookup_status == "unavailable":
+        return Verdict(label=VERDICT_NEEDS_REVIEW, emoji="\u26a0\ufe0f")
+    return verdict
+
+
+def ticket_unverified_note(result: ReviewResult) -> str:
+    """Why a referenced ticket could not be graded, or ``""`` when it could."""
+    if result.linear_lookup_status != "unavailable":
+        return ""
+    identifiers = ", ".join(result.linear_issue_ids) or "the linked ticket"
+    detail = f" ({result.linear_lookup_detail})" if result.linear_lookup_detail else ""
+    return (
+        f"Could not read {identifiers}{detail}, so its acceptance criteria are "
+        "unverified — this review is not an approval."
     )
 
 
@@ -352,6 +387,8 @@ class WalkthroughResult:
         additions: int = 0,
         deletions: int = 0,
         ticket_criteria: list[TicketCriterion] | None = None,
+        verdict: Verdict | None = None,
+        verdict_note: str = "",
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -373,7 +410,9 @@ class WalkthroughResult:
         # Suppressed during the in-progress render (findings aren't known yet)
         # and on failure (a "looks good" next to a failure notice is wrong).
         if not in_progress and not failure_notice:
-            verdict_lines = self._render_verdict(comments, key_issues, ticket_criteria)
+            verdict_lines = self._render_verdict(
+                comments, key_issues, ticket_criteria, verdict, verdict_note
+            )
             if verdict_lines:
                 parts.append("")
                 parts.extend(verdict_lines)
@@ -530,21 +569,26 @@ class WalkthroughResult:
         comments: list[ReviewComment] | None,
         key_issues: list[KeyIssue] | None,
         ticket_criteria: list[TicketCriterion] | None = None,
+        verdict: Verdict | None = None,
+        note: str = "",
     ) -> list[str]:
         """Render the verdict headline plus exactly what must change.
 
         The headline is derived from the final findings rather than the model's
         free-form label, so a "Request changes" verdict is always accompanied by
-        the blocker/warning list that justifies it.
+        the blocker/warning list that justifies it. Callers that already derived
+        the review verdict pass it in so the headline, the review-body verdict
+        row, and the check run can never disagree.
         """
         cs = self.confidence_score
-        verdict = derive_verdict(comments, cs, ticket_criteria)
+        if verdict is None:
+            verdict = derive_verdict(comments, cs, ticket_criteria)
 
         # Nothing to say: no score, no findings, no key issues, no criteria.
         has_findings = bool(
             verdict.blockers or verdict.warnings or verdict.optional or verdict.unmet_criteria
         )
-        if cs is None and not has_findings and not key_issues and not ticket_criteria:
+        if cs is None and not has_findings and not key_issues and not ticket_criteria and not note:
             return []
 
         lines = [f"## Verdict: {verdict.emoji} {verdict.label}", ""]
@@ -556,6 +600,9 @@ class WalkthroughResult:
             if reason:
                 line += f" — {reason}"
             lines.append(line)
+            lines.append("")
+        if note:
+            lines.append(f"> {note}")
             lines.append("")
 
         if verdict.blockers:
@@ -743,6 +790,9 @@ class ReviewResult:
     linear_issue_ids: list[str] = field(default_factory=list)
     linear_issue_urls: list[str] = field(default_factory=list)
     linear_lookup_status: str = "not_linked"
+    # Why a referenced ticket could not be graded (missing key, API error, not
+    # found), shown next to the "Unknown" verdict so it is actionable.
+    linear_lookup_detail: str = ""
     # Diagnostic trail: per-chunk draft counts and every comment dropped by a
     # filter/critique stage, so a benchmark run can show whether a missed
     # finding was never drafted or drafted-then-dropped. Not posted anywhere.
