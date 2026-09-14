@@ -29,6 +29,7 @@ from mira.models import (
     WalkthroughResult,
     build_review_stats,
     derive_review_verdict,
+    linear_ticket_status,
     ticket_unverified_note,
 )
 
@@ -591,6 +592,20 @@ class TestWalkthroughToMarkdown:
         md = result.to_markdown(in_progress=True, status_rows=[("Tests", "x")])
         assert "### Review status" not in md
 
+    def test_ticket_criteria_include_a_legend(self):
+        """⚠️ must be explained — it means "not verifiable", not "passed"."""
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            ticket_criteria=[
+                TicketCriterion("EPIC-1113", "A", "met", "done"),
+                TicketCriterion("EPIC-1113", "B", "unclear", "not in this diff"),
+            ]
+        )
+        assert "### Ticket acceptance criteria" in md
+        assert "✅ met · ❌ unmet · ⚠️ unclear — not verifiable from this diff" in md
+        assert "- ✅ A — done" in md
+        assert "- ⚠️ B — not in this diff" in md
+
     def test_optional_suggestions_collapsed(self):
         result = WalkthroughResult(summary="Changes.")
         md = result.to_markdown(comments=[self._comment(Severity.SUGGESTION)])
@@ -816,6 +831,79 @@ class TestDeriveReviewVerdict:
         )
         assert derive_review_verdict(result).label == "Looks good to merge"
         assert ticket_unverified_note(result) == ""
+
+
+class TestLinearTicketStatusRow:
+    """The Review status row grades the ticket, not the code."""
+
+    def _result(self, criteria, comments=None) -> ReviewResult:
+        return ReviewResult(
+            comments=comments or [],
+            linear_issue_ids=["EPIC-1113"],
+            linear_issue_urls=["https://linear.app/x/issue/EPIC-1113"],
+            linear_lookup_status="loaded",
+            ticket_criteria=criteria,
+        )
+
+    def test_all_met(self):
+        value, verified = linear_ticket_status(
+            self._result([TicketCriterion("EPIC-1113", "A", "met")])
+        )
+        assert value.startswith("Yes — [EPIC-1113]")
+        assert "all 1 acceptance criteria met" in value
+        assert verified is True
+
+    def test_partly_graded_says_so(self):
+        result = self._result(
+            [
+                TicketCriterion("EPIC-1113", "A", "met"),
+                TicketCriterion("EPIC-1113", "B", "unclear", "not in this repo's diff"),
+            ]
+        )
+        value, _ = linear_ticket_status(result)
+        assert value.startswith("Partly")
+        assert "1 of 2 criteria met" in value
+        assert "1 unclear from the diff" in value
+
+    def test_unmet_ticket_is_a_no(self):
+        value, verified = linear_ticket_status(
+            self._result([TicketCriterion("EPIC-1113", "A", "unmet", "missing")])
+        )
+        assert value.startswith("No —")
+        assert "1 acceptance criterion unmet" in value
+        assert verified is False
+
+    def test_code_findings_do_not_change_the_ticket_row(self):
+        """Blockers are the verdict's job — the ticket row still reports Yes."""
+        result = self._result(
+            [TicketCriterion("EPIC-1113", "A", "met")],
+            comments=[
+                ReviewComment(
+                    path="a.py",
+                    line=1,
+                    end_line=None,
+                    severity=Severity.BLOCKER,
+                    category="bug",
+                    title="Boom",
+                    body="b",
+                    confidence=0.9,
+                )
+            ],
+        )
+        value, verified = linear_ticket_status(result)
+        assert value.startswith("Yes —")
+        assert verified is True
+
+    def test_unreadable_ticket_is_unknown(self):
+        result = ReviewResult(
+            linear_issue_ids=["EPIC-1113"],
+            linear_lookup_status="unavailable",
+            linear_lookup_detail="no Linear API key set",
+        )
+        value, verified = linear_ticket_status(result)
+        assert value.startswith("Unknown —")
+        assert "no Linear API key set" in value
+        assert verified is False
 
 
 class TestBuildReviewStats:

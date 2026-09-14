@@ -337,13 +337,19 @@ def linear_ticket_status(result: ReviewResult) -> tuple[str, bool]:
             f"No — {linked}; {count} acceptance criterion{'s' if count != 1 else ''} unmet",
             False,
         )
-    has_blocking_findings = any(
-        comment.severity in {Severity.BLOCKER, Severity.WARNING} for comment in result.comments
-    )
-    if has_blocking_findings:
-        return f"No — {linked}; blocking review findings remain", False
+    # This row grades the ticket, not the code: code findings are the verdict's
+    # job (and the earlier "blocking review findings remain" wording made a
+    # fully-graded ticket read like an unverified one).
     total = len(result.ticket_criteria)
     if total:
+        met = len([c for c in result.ticket_criteria if c.status == "met"])
+        unclear = total - met
+        if unclear:
+            return (
+                f"Partly — {linked}; {met} of {total} criteria met, "
+                f"{unclear} unclear from the diff",
+                True,
+            )
         return f"Yes — {linked}; all {total} acceptance criteria met", True
     return f"Yes — {linked}; no explicit acceptance criteria in the ticket", True
 
@@ -790,7 +796,12 @@ class WalkthroughResult:
         for c in ticket_criteria:
             by_issue.setdefault(c.issue, []).append(c)
 
-        lines = ["### Ticket acceptance criteria", ""]
+        lines = [
+            "### Ticket acceptance criteria",
+            "",
+            "✅ met · ❌ unmet · ⚠️ unclear — not verifiable from this diff",
+            "",
+        ]
         for issue, criteria in by_issue.items():
             lines.append(f"**{issue}**")
             lines.append("")
