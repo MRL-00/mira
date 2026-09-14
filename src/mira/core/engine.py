@@ -71,9 +71,40 @@ from mira.models import (
     ticket_unverified_note,
 )
 from mira.providers.base import BaseProvider
+from mira.providers.formatting import parse_bot_comment_metadata
 from mira.security.secrets_scan import scan_secrets
 
 logger = logging.getLogger(__name__)
+
+
+def _outstanding_comments(threads: list[UnresolvedThread]) -> list[ReviewComment]:
+    """Mira's still-open review threads, rebuilt as findings for the verdict.
+
+    A re-review is told not to repeat what it already posted, and
+    ``drop_already_posted`` removes overlaps, so on its own it cannot downgrade
+    a PR whose earlier blocker is still open. Severity and title are recovered
+    from the comment body Mira posted (``parse_bot_comment_metadata``).
+    """
+    outstanding: list[ReviewComment] = []
+    for thread in threads:
+        if thread.is_outdated or thread.line <= 0:
+            # Can't be located on the current diff, so treat it as resolved-out.
+            continue
+        meta = parse_bot_comment_metadata(thread.body)
+        outstanding.append(
+            ReviewComment(
+                path=thread.path,
+                line=thread.line,
+                end_line=None,
+                severity=Severity.from_str(meta.get("severity") or "suggestion"),
+                category=meta.get("category") or "other",
+                title=meta.get("title") or "Unresolved finding",
+                body="",
+                confidence=0.0,
+                source_pass="outstanding",
+            )
+        )
+    return outstanding
 
 
 def _audit_drop(c: ReviewComment, stage: str, reason: str = "") -> dict:
@@ -853,13 +884,25 @@ class ReviewEngine:
         result.linear_lookup_status = linear_lookup.status
         result.linear_lookup_detail = linear_lookup.detail
 
+        # Findings Mira already posted and that are still open. They feed the
+        # verdict so a re-review cannot report "Looks good to merge" while its
+        # own blocker thread sits unresolved (it won't re-draft it).
+        result.outstanding_comments = _outstanding_comments(unresolved_threads)
+        if result.outstanding_comments:
+            logger.info(
+                "PR %s has %d still-open finding(s) from earlier reviews; including them in the verdict",
+                pr_info.url,
+                len(result.outstanding_comments),
+            )
+
         # One verdict for the whole review. Computed here, after confidence is
         # clamped to the findings that survived, so the walkthrough headline,
-        # the review-body row, the posted review event, and the check run all
-        # report the same thing.
+        # the post review event, and the check run all report the same thing.
         if result.walkthrough:
             _clamp_confidence_to_findings(
-                result.walkthrough, result.comments, result.ticket_criteria
+                result.walkthrough,
+                [*result.comments, *result.outstanding_comments],
+                result.ticket_criteria,
             )
         verdict = derive_review_verdict(result)
         verdict_note = ticket_unverified_note(result)
@@ -958,6 +1001,7 @@ class ReviewEngine:
                         verdict=verdict,
                         verdict_note=verdict_note,
                         status_rows=status_rows or None,
+                        outstanding_count=len(result.outstanding_comments),
                     )
                     comment_id = placeholder_id
                     if comment_id is None:

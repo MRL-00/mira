@@ -136,8 +136,9 @@ _CRITERION_GLYPH: dict[str, str] = {"met": "\u2705", "unmet": "\u274c", "unclear
 def _check_summary(result: ReviewResult, verdict_label: str) -> str:
     """One-paragraph check-run summary: verdict, finding counts, and the summary."""
     lines = [f"**{verdict_label}**"]
-    blockers = sum(1 for c in result.comments if c.severity == Severity.BLOCKER)
-    warnings = sum(1 for c in result.comments if c.severity == Severity.WARNING)
+    filed = [*result.comments, *result.outstanding_comments]
+    blockers = sum(1 for c in filed if c.severity == Severity.BLOCKER)
+    warnings = sum(1 for c in filed if c.severity == Severity.WARNING)
     unmet = sum(1 for c in result.ticket_criteria if c.is_unmet)
     stats: list[str] = []
     if blockers:
@@ -150,6 +151,12 @@ def _check_summary(result: ReviewResult, verdict_label: str) -> str:
         lines.append(", ".join(stats).capitalize() + ".")
     if result.summary:
         lines.append(result.summary)
+    if result.outstanding_comments:
+        count = len(result.outstanding_comments)
+        lines.append(
+            f"{count} finding{'s' if count != 1 else ''} from an earlier review "
+            f"{'are' if count != 1 else 'is'} still open on this PR."
+        )
     note = ticket_unverified_note(result)
     if note:
         lines.append(note)
@@ -189,7 +196,11 @@ def _blocking_summary(result: ReviewResult) -> str:
         criteria = "; ".join(f"`{c.issue}` — {c.criterion}" for c in unmet[:3])
         extra = f" (+{len(unmet) - 3} more)" if len(unmet) > 3 else ""
         return f"**Request changes** — ticket requirements not met: {criteria}{extra}"
-    blockers = [c for c in result.comments if c.severity == Severity.BLOCKER]
+    blockers = [
+        c
+        for c in [*result.comments, *result.outstanding_comments]
+        if c.severity == Severity.BLOCKER
+    ]
     if blockers:
         named = "; ".join(f"`{c.path}:{c.line}` — {c.title}" for c in blockers[:3])
         return f"**Request changes** — blockers found: {named}"
