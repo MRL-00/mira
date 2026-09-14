@@ -323,7 +323,8 @@ class TestPostReviewRequestChanges:
         assert calls[0]["event"] == "REQUEST_CHANGES"
 
     @pytest.mark.asyncio
-    async def test_plain_comment_event_by_default(self):
+    async def test_blocker_requests_changes_without_flag(self):
+        """A blocker forces REQUEST_CHANGES even without an explicit flag."""
         calls: list[dict] = []
 
         def _create_review(**kwargs):
@@ -335,7 +336,7 @@ class TestPostReviewRequestChanges:
         provider, _ = self._provider(create_review=_create_review)
         result = ReviewResult(comments=[self._comment()], summary="Found issues")
         await provider.post_review(_make_pr_info(), result)
-        assert calls[0]["event"] == "COMMENT"
+        assert calls[0]["event"] == "REQUEST_CHANGES"
 
     @pytest.mark.asyncio
     async def test_request_changes_posts_without_inline_comments(self):
@@ -357,9 +358,9 @@ class TestPostReviewRequestChanges:
         mock_pr.create_review_comment.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_comments_and_no_request_changes_posts_nothing(self):
+    async def test_no_content_and_no_request_changes_posts_nothing(self):
         provider, mock_pr = self._provider()
-        result = ReviewResult(comments=[], summary="Looks great")
+        result = ReviewResult(comments=[], summary="")
         await provider.post_review(_make_pr_info(), result)
         mock_pr.create_review.assert_not_called()
 

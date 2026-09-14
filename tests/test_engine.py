@@ -2375,6 +2375,7 @@ class TestAgenticToolsOnIndexedRepos:
         mock_provider.find_bot_comment = AsyncMock(return_value=None)
         mock_provider.post_comment = AsyncMock()
         mock_provider.update_comment = AsyncMock()
+        mock_provider.post_review = AsyncMock(return_value=[])
         mock_provider.resolve_outdated_review_threads = AsyncMock(return_value=0)
         return mock_provider
 

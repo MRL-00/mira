@@ -132,8 +132,7 @@ def _linear_review_value(result: ReviewResult) -> tuple[str, bool]:
     if unmet:
         count = len(unmet)
         return (
-            f"No — {linked}; {count} acceptance "
-            f"criterion{'s' if count != 1 else ''} unmet",
+            f"No — {linked}; {count} acceptance criterion{'s' if count != 1 else ''} unmet",
             False,
         )
     has_blocking_findings = any(
