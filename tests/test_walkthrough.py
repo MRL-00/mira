@@ -571,6 +571,26 @@ class TestWalkthroughToMarkdown:
         assert "## Verdict: \u26a0\ufe0f Needs review" in md
         assert "> Could not read EPIC-1113 — no Linear API key set." in md
 
+    def test_review_status_rows_render(self):
+        """CI/docs/ticket status lives in the walkthrough, not a second comment."""
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            status_rows=[
+                ("Tests", "GitHub checks: 604 passed, 0 failed, 8 skipped, 0 pending"),
+                ("Documentation", "Yes — `docs/review.md`"),
+                ("Linked ticket", "Yes — [EPIC-1113](https://linear.app/x); all 8 criteria met"),
+            ]
+        )
+        assert "### Review status" in md
+        assert "- **Tests:** GitHub checks: 604 passed" in md
+        assert "- **Documentation:** Yes — `docs/review.md`" in md
+        assert "- **Linked ticket:** Yes — [EPIC-1113]" in md
+
+    def test_review_status_suppressed_in_progress(self):
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(in_progress=True, status_rows=[("Tests", "x")])
+        assert "### Review status" not in md
+
     def test_optional_suggestions_collapsed(self):
         result = WalkthroughResult(summary="Changes.")
         md = result.to_markdown(comments=[self._comment(Severity.SUGGESTION)])

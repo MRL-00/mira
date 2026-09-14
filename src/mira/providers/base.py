@@ -11,6 +11,8 @@ from mira.models import (
     PRInfo,
     ReviewResult,
     UnresolvedThread,
+    documentation_paths,
+    linear_ticket_status,
 )
 
 
@@ -91,6 +93,18 @@ class BaseProvider(abc.ABC):
         Default no-op — only hosts with a checks API (GitHub) implement it.
         """
         return
+
+    async def review_status_rows(
+        self, pr_info: PRInfo, result: ReviewResult
+    ) -> list[tuple[str, str]]:
+        """Status rows (label, value) for the walkthrough's "Review status" block.
+
+        Hosts that can read CI add a Tests row on top of this.
+        """
+        docs = documentation_paths(result.total_paths)
+        docs_value = f"Yes — {', '.join(f'`{path}`' for path in docs)}" if docs else "No"
+        ticket_value, _verified = linear_ticket_status(result)
+        return [("Documentation", docs_value), ("Linked ticket", ticket_value)]
 
     async def add_label(self, pr_info: PRInfo, label: str) -> None:
         """Add a label to a pull request."""

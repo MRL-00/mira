@@ -303,6 +303,51 @@ def ticket_unverified_note(result: ReviewResult) -> str:
     )
 
 
+def documentation_paths(paths: list[str]) -> list[str]:
+    """Paths that look like documentation, for the review status block."""
+    return [
+        path
+        for path in paths
+        if path.lower().endswith((".md", ".mdx", ".rst"))
+        or path.lower().startswith(("docs/", "documentation/"))
+    ]
+
+
+def linear_ticket_status(result: ReviewResult) -> tuple[str, bool]:
+    """Ticket row for the review status block: text + whether it verified."""
+    if result.linear_lookup_status == "not_linked":
+        return "N/A — No linked Linear ticket found", True
+    if result.linear_lookup_status != "loaded":
+        identifiers = ", ".join(result.linear_issue_ids)
+        suffix = f" ({identifiers})" if identifiers else ""
+        reason = f" — {result.linear_lookup_detail}" if result.linear_lookup_detail else ""
+        return f"Unknown — Linear ticket could not be checked{suffix}{reason}", False
+
+    links: list[str] = []
+    for index, identifier in enumerate(result.linear_issue_ids):
+        if index < len(result.linear_issue_urls):
+            links.append(f"[{identifier}]({result.linear_issue_urls[index]})")
+        else:
+            links.append(identifier)
+    linked = ", ".join(links)
+    unmet = [c for c in result.ticket_criteria if c.is_unmet]
+    if unmet:
+        count = len(unmet)
+        return (
+            f"No — {linked}; {count} acceptance criterion{'s' if count != 1 else ''} unmet",
+            False,
+        )
+    has_blocking_findings = any(
+        comment.severity in {Severity.BLOCKER, Severity.WARNING} for comment in result.comments
+    )
+    if has_blocking_findings:
+        return f"No — {linked}; blocking review findings remain", False
+    total = len(result.ticket_criteria)
+    if total:
+        return f"Yes — {linked}; all {total} acceptance criteria met", True
+    return f"Yes — {linked}; no explicit acceptance criteria in the ticket", True
+
+
 @dataclass
 class LinkedIssue:
     """A tracker issue (e.g. Linear) referenced by the pull request."""
@@ -392,6 +437,7 @@ class WalkthroughResult:
         ticket_criteria: list[TicketCriterion] | None = None,
         verdict: Verdict | None = None,
         verdict_note: str = "",
+        status_rows: list[tuple[str, str]] | None = None,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -520,6 +566,16 @@ class WalkthroughResult:
                 separator = " \u00b7 "
                 parts.append("")
                 parts.append(f"*{separator.join(stats_parts)}*")
+
+        # CI, docs, and ticket verification were a second comment (the review
+        # body) until they moved here — the walkthrough is the one summary, so
+        # the review itself can stay empty and the PR gets a single comment.
+        if status_rows and not in_progress and not failure_notice:
+            parts.append("")
+            parts.append("### Review status")
+            parts.append("")
+            for label, value in status_rows:
+                parts.append(f"- **{label}:** {value}")
 
         if skipped_paths and not in_progress:
             total = len(total_paths) if total_paths else (reviewed_files + len(skipped_paths))

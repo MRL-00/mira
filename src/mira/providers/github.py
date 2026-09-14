@@ -30,6 +30,7 @@ from mira.models import (
     Severity,
     UnresolvedThread,
     derive_review_verdict,
+    linear_ticket_status,
     ticket_unverified_note,
 )
 from mira.providers.base import BaseProvider
@@ -42,9 +43,6 @@ from mira.providers.formatting import (  # noqa: F401
 )
 from mira.providers.formatting import (
     format_comment_body as _format_comment_body,
-)
-from mira.providers.formatting import (
-    format_key_issues as _format_key_issues,
 )
 
 # Transient errors worth retrying — network issues and GitHub server errors.
@@ -83,7 +81,8 @@ def _documentation_paths(paths: list[str]) -> list[str]:
     ]
 
 
-def _github_checks(commit: Any) -> tuple[str, str, bool]:
+def _checks_status(commit: Any) -> str:
+    """One-line CI status for the walkthrough's "Review status" block."""
     try:
         runs = list(commit.get_check_runs())
     except Exception as exc:
@@ -95,17 +94,12 @@ def _github_checks(commit: Any) -> tuple[str, str, bool]:
             else "the checks API was unavailable"
         )
         return (
-            f"Not run — Mira does not run your test suite; GitHub checks could not be read ({hint}).",
-            "Unknown",
-            False,
+            "Not run — Mira does not run your test suite; GitHub checks could not be read "
+            f"({hint})."
         )
 
     if not runs:
-        return (
-            "Not run — Mira does not run your test suite and no GitHub checks were reported.",
-            "Not run — no GitHub checks found",
-            False,
-        )
+        return "Not run — Mira does not run your test suite and no GitHub checks were reported."
 
     conclusions = Counter((getattr(run, "conclusion", None) or "pending").lower() for run in runs)
     passed = conclusions["success"]
@@ -116,13 +110,7 @@ def _github_checks(commit: Any) -> tuple[str, str, bool]:
         for conclusion, count in conclusions.items()
         if conclusion not in {"success", "skipped", "neutral", "pending"}
     )
-    counts = f"{passed} passed, {failed} failed, {skipped} skipped, {pending} pending"
-    green = passed > 0 and failed == 0 and pending == 0
-    return (
-        f"Not run locally — Mira inspected GitHub checks: {counts}.",
-        f"{'Yes' if green else 'No'} — {counts}",
-        green,
-    )
+    return f"GitHub checks: {passed} passed, {failed} failed, {skipped} skipped, {pending} pending"
 
 
 # Maps Mira's verdict to a GitHub check-run conclusion. "Request changes"
@@ -187,37 +175,44 @@ def _check_text(result: ReviewResult) -> str:
 
 def _linear_review_value(result: ReviewResult) -> tuple[str, bool]:
     """Ticket row for the review table: rendered value + whether it verified."""
-    if result.linear_lookup_status == "not_linked":
-        return "N/A — No linked Linear ticket found", True
-    if result.linear_lookup_status != "loaded":
-        identifiers = ", ".join(result.linear_issue_ids)
-        suffix = f" ({identifiers})" if identifiers else ""
-        reason = f" — {result.linear_lookup_detail}" if result.linear_lookup_detail else ""
-        return f"Unknown — Linear ticket could not be checked{suffix}{reason}", False
+    return linear_ticket_status(result)
 
-    links: list[str] = []
-    for index, identifier in enumerate(result.linear_issue_ids):
-        if index < len(result.linear_issue_urls):
-            links.append(f"[{identifier}]({result.linear_issue_urls[index]})")
-        else:
-            links.append(identifier)
-    linked = ", ".join(links)
+
+def _blocking_summary(result: ReviewResult) -> str:
+    """One-line reason posted as the review body when nothing is inline.
+
+    A blocking review needs *some* body (it has no inline comments to carry the
+    message) and must still name what has to change.
+    """
     unmet = [c for c in result.ticket_criteria if c.is_unmet]
     if unmet:
-        count = len(unmet)
-        return (
-            f"No — {linked}; {count} acceptance criterion{'s' if count != 1 else ''} unmet",
-            False,
-        )
-    has_blocking_findings = any(
-        comment.severity in {Severity.BLOCKER, Severity.WARNING} for comment in result.comments
-    )
-    if has_blocking_findings:
-        return f"No — {linked}; blocking review findings remain", False
-    total = len(result.ticket_criteria)
-    if total:
-        return f"Yes — {linked}; all {total} acceptance criteria met", True
-    return f"Yes — {linked}; no explicit acceptance criteria in the ticket", True
+        criteria = "; ".join(f"`{c.issue}` — {c.criterion}" for c in unmet[:3])
+        extra = f" (+{len(unmet) - 3} more)" if len(unmet) > 3 else ""
+        return f"**Request changes** — ticket requirements not met: {criteria}{extra}"
+    blockers = [c for c in result.comments if c.severity == Severity.BLOCKER]
+    if blockers:
+        named = "; ".join(f"`{c.path}:{c.line}` — {c.title}" for c in blockers[:3])
+        return f"**Request changes** — blockers found: {named}"
+    return "**Request changes** — see the walkthrough comment for the details."
+
+
+def _findings_fallback_body(result: ReviewResult) -> str:
+    """Body used when GitHub rejects every inline comment.
+
+    The review must still show up, so the findings are listed in the body
+    instead of vanishing with the inlines.
+    """
+    if not result.comments:
+        return ""
+    count = len(result.comments)
+    lines = [
+        f"**{count} finding{'s' if count != 1 else ''}** — GitHub rejected the inline "
+        "comments, so they are listed here:",
+        "",
+    ]
+    for c in result.comments:
+        lines.append(f"- `{c.path}:{c.line}` — {c.title} ({c.severity.name.lower()})")
+    return "\n".join(lines)
 
 
 def _review_body_and_event(
@@ -226,23 +221,19 @@ def _review_body_and_event(
     verdict_label: str | None = None,
     request_changes: bool | None = None,
 ) -> tuple[str, str]:
-    """The review's status card and the GitHub event to post it with.
+    """The review body and the GitHub event to post it with.
 
-    Deliberately narrow: the walkthrough comment already carries the summary,
-    the verdict rationale, the Mermaid change map, and the per-file detail.
-    Repeating them here produced a second near-identical wall of text, so this
-    body keeps only what the walkthrough does not say — CI status, docs, ticket
-    verification, and the verdict row — plus the inline-findings pointer.
+    The body is empty on purpose. Everything a reader needs — summary, verdict
+    rationale, Mermaid change map, ticket checklist, CI/docs/ticket status — is
+    in the walkthrough comment, so a second body just duplicated it (and made
+    every PR look like it had two competing reviews). The only exception is a
+    blocking verdict with no inline comments, where the review is the thing
+    doing the blocking and must say why.
 
     The verdict comes from the engine (``derive_review_verdict``), the same
     value the walkthrough headline and the check run use, so the three surfaces
     can never disagree.
     """
-    tests, tests_pass, _checks_green = _github_checks(commit)
-    linear_value, _linear_approved = _linear_review_value(result)
-    docs = _documentation_paths(result.total_paths)
-    docs_value = f"Yes — {', '.join(f'`{path}`' for path in docs)}" if docs else "No"
-
     if verdict_label is None:
         verdict_label = derive_review_verdict(result).label
     event = _REVIEW_EVENT.get(verdict_label, "COMMENT")
@@ -250,29 +241,10 @@ def _review_body_and_event(
         # Config keeps Mira advisory even when it found blockers.
         event = "COMMENT"
 
-    rows = [
-        ("**Tests:**", tests),
-        ("**Tests Pass:**", tests_pass),
-        ("**Includes Documentation:**", docs_value),
-        ("**Reviewed against Linear ticket and approved:**", linear_value),
-        ("**Final verdict:**", event),
-    ]
-    lines = ["| Field | Value |", "| --- | --- |"]
-    lines.extend(f"| {field} | {_table_value(value)} |" for field, value in rows)
-
-    lines.extend(("", "### Review outcome", ""))
-    if result.comments:
-        count = len(result.comments)
-        lines.append(f"{count} actionable finding{'s' if count != 1 else ''} attached inline.")
-    else:
-        lines.append("No actionable findings survived Mira's evidence and self-critique checks.")
-        note = ticket_unverified_note(result)
-        if note:
-            lines.append("")
-            lines.append(f"> {note}")
-    if result.key_issues:
-        lines.append(_format_key_issues(result.key_issues))
-    return "\n".join(lines), event
+    body = (
+        "" if result.comments else _blocking_summary(result) if event == "REQUEST_CHANGES" else ""
+    )
+    return body, event
 
 
 def _normalize_login(login: str) -> str:
@@ -627,10 +599,11 @@ class GitHubProvider(BaseProvider):
         request_changes: bool | None = None,
         verdict_label: str | None = None,
     ) -> list[int]:
-        # Post when there is anything to say: inline findings, a summary body
-        # (deploy-branch behaviour), or a blocking "Request changes" verdict
-        # with no inline comments.
-        if not result.comments and not result.summary and not request_changes:
+        # The walkthrough comment already carries the verdict, and the check run
+        # reports it to GitHub. Only post a review when there is something it
+        # alone can carry: inline findings, or a blocking verdict that needs a
+        # REQUEST_CHANGES review to actually block the merge.
+        if not result.comments and not request_changes:
             return []
 
         def _anchor(c: ReviewComment) -> int:
@@ -735,13 +708,15 @@ class GitHubProvider(BaseProvider):
                     else:
                         raise
 
-            # If every inline failed, post the summary alone so the review still shows up.
-            if posted == 0 and review_body:
+            # If every inline failed, post the findings as a body so the review
+            # still shows up — an empty body would drop them entirely.
+            fallback_body = review_body or _findings_fallback_body(result)
+            if posted == 0 and fallback_body:
                 for event in (review_event, "COMMENT"):
                     try:
                         pr.create_review(
                             commit=latest_commit,
-                            body=review_body,
+                            body=fallback_body,
                             event=event,
                             comments=[],
                         )
@@ -763,6 +738,26 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to post review: {e}") from e
+
+    async def review_status_rows(
+        self, pr_info: PRInfo, result: ReviewResult
+    ) -> list[tuple[str, str]]:
+        """Add the CI row on top of the provider-agnostic docs/ticket rows."""
+        rows = await super().review_status_rows(pr_info, result)
+        try:
+            status = await asyncio.to_thread(self._checks_status, pr_info)
+        except Exception as exc:  # noqa: BLE001 — status must never break a review
+            logger.warning("Could not read GitHub checks for status rows: %s", exc)
+            return rows
+        return [("Tests", status), *rows]
+
+    def _checks_status(self, pr_info: PRInfo) -> str:
+        gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+        pr = gh_repo.get_pull(pr_info.number)
+        commits = list(pr.get_commits())
+        if not commits:
+            return "Not run — Mira does not run your test suite."
+        return _checks_status(commits[-1])
 
     async def post_check_run(
         self,

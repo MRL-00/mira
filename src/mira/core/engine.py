@@ -868,6 +868,15 @@ class ReviewEngine:
             and verdict.label == VERDICT_REQUEST_CHANGES
         )
 
+        # CI/docs/ticket status rows shown in the walkthrough. Best-effort: a
+        # provider that can't read them (or is slow/failing) just omits them.
+        status_rows: list[tuple[str, str]] = []
+        if result.walkthrough and not self.dry_run:
+            try:
+                status_rows = await self.provider.review_status_rows(pr_info, result)
+            except Exception as exc:
+                logger.warning("Failed to collect review status rows: %s", exc)
+
         if result.walkthrough:
             if self.dry_run:
                 logger.info("Dry run: skipping walkthrough comment posting")
@@ -948,6 +957,7 @@ class ReviewEngine:
                         ticket_criteria=result.ticket_criteria or None,
                         verdict=verdict,
                         verdict_note=verdict_note,
+                        status_rows=status_rows or None,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
