@@ -1148,6 +1148,12 @@ class ReviewEngine:
         completes. Exceptions in the callback are logged and swallowed.
         """
         import asyncio as _asyncio
+        import time as _time
+
+        # Coarse stage timings, logged at the end so operators can see where a
+        # slow review spends its time (context build vs chunk review vs the
+        # post-review critique/summary passes).
+        _t_start = _time.monotonic()
 
         # Parse the full diff (not just the priority-selected subset) so the
         # walkthrough can surface skipped files to the user.
@@ -1351,6 +1357,7 @@ class ReviewEngine:
             _build_context(),
             _fetch_file_history(),
         )
+        _t_context = _time.monotonic()
 
         expanded = expand_context(filtered, self.config.review.context_lines)
 
@@ -1614,6 +1621,7 @@ class ReviewEngine:
         ) = await _asyncio.gather(
             review_task, security_task, dependency_task, osv_task, secrets_task
         )
+        _t_chunks = _time.monotonic()
 
         all_comments: list[ReviewComment] = []
         all_key_issues: list[KeyIssue] = []
@@ -1677,6 +1685,7 @@ class ReviewEngine:
                 )
             except Exception as exc:
                 logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
+        _t_critique = _time.monotonic()
 
         all_key_issues = _drop_orphan_key_issues(all_key_issues, final_comments)
 
@@ -1701,7 +1710,19 @@ class ReviewEngine:
         else:
             summary = ""
 
+        _t_summary = _time.monotonic()
+
         walkthrough = await walkthrough_task
+
+        logger.info(
+            "Review timing %s: context=%.1fs chunks=%.1fs critique=%.1fs summary=%.1fs total=%.1fs",
+            getattr(getattr(self, "_pr_info", None), "url", "") or "<diff>",
+            _t_context - _t_start,
+            _t_chunks - _t_context,
+            _t_critique - _t_chunks,
+            _t_summary - _t_critique,
+            _time.monotonic() - _t_start,
+        )
 
         return ReviewResult(
             comments=final_comments,

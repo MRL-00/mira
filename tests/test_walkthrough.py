@@ -544,11 +544,27 @@ class TestWalkthroughToMarkdown:
             ],
         )
         md = result.to_markdown()
-        assert "### What changed" in md
+        # Collapsed so a large file list doesn't dominate the comment.
+        assert "<details>" in md
+        assert "<summary><b>What changed</b> — 3 files</summary>" in md
         assert "**Core**" in md
         assert "**Tests**" in md
         assert "- **Added** `a.py` — New helper" in md
         assert "- **Modified** `b.py` — Wire it up" in md
+
+    def test_changes_section_caps_file_list(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            file_changes=[
+                WalkthroughFileEntry(f"f{i}.py", FileChangeType.MODIFIED, "x", "Core")
+                for i in range(40)
+            ],
+        )
+        md = result.to_markdown()
+        assert "<summary><b>What changed</b> — 40 files</summary>" in md
+        assert "- **Modified** `f14.py` — x" in md
+        assert "- **Modified** `f15.py` — x" not in md
+        assert "_…and 25 more files_" in md
 
     def test_linked_issues_rendered(self):
         from mira.models import LinkedIssue
