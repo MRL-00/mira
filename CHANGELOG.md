@@ -24,6 +24,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Review status ticket row grades the ticket, not the code.** A loaded ticket whose criteria were all graded read "No — …; blocking review findings remain" whenever the review found a blocker, which made it look unverified. The row now reports the ticket's own result — `Yes` (all criteria met), `Partly — N of M criteria met, K unclear from the diff`, `No` (unmet criteria), or `Unknown` (unreadable) — and the criteria checklist gained a legend (`✅ met · ❌ unmet · ⚠️ unclear — not verifiable from this diff`) so the ⚠️ glyph is never mistaken for a pass.
 - **Linear lookups no longer fail silently.** Every failure mode (linking disabled, no API key, HTTP/GraphQL error, ticket not found or not visible to the key) now reports a specific reason in the review table, the walkthrough verdict note, and the server log. The shipped `docker-compose.yml` and README documented `MIRA_LINEAR_API_KEY` while the app read `MIRA_LINEAR_TOKEN`; both names now work (`linear.api_key_env` is checked first, then `api_key_env_fallbacks`), and the compose file passes each through.
 - **Readable "could not run tests" message.** When GitHub check runs can't be read, the Tests row says so and, on a 403/404, points at the App's missing **Checks: read** permission instead of a generic message.
 
