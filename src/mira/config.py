@@ -276,6 +276,12 @@ class ReviewConfig(BaseModel):
     # resolves them (user-initiated reject/resolve replies still work).
     auto_resolve_conversations: bool = True
 
+    # Submit the platform review as "Request changes" (not a plain comment) when
+    # the derived verdict is "Request changes" — i.e. there is a blocker or a
+    # linked-ticket acceptance criterion the PR does not satisfy. This actively
+    # blocks merge on hosts that honour it. Set false to always comment.
+    request_changes_on_blocker: bool = True
+
     # Auto-review on every push (`synchronize` event). When False, Mira only
     # reviews when the PR is opened or reopened. Subsequent commits are
     # ignored unless you comment `@bot_name review` to trigger a manual pass.

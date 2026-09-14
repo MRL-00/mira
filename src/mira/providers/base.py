@@ -35,6 +35,7 @@ class BaseProvider(abc.ABC):
         pr_info: PRInfo,
         result: ReviewResult,
         bot_name: str = "miracodeai",
+        request_changes: bool = False,
     ) -> list[int]:
         """Post review comments to a pull request.
 

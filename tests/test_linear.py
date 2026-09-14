@@ -8,6 +8,7 @@ import mira.linear as linear_mod
 from mira.config import MiraConfig
 from mira.linear import (
     LinearClient,
+    extract_acceptance_criteria,
     extract_issue_identifiers,
     format_issues_context,
     issue_identifiers_for_pr,
@@ -97,6 +98,14 @@ class _FakeAsyncClient:
         return self._responses.get(identifier, _FakeResponse({"data": {"issue": None}}))
 
 
+_DESCRIPTION = (
+    "Bound the Stripe retry loop.\n\n"
+    "## Acceptance Criteria\n\n"
+    "- [ ] Retries are capped at RETRY_LIMIT\n"
+    "- [ ] Terminal failures surface to the caller\n"
+)
+
+
 def _issue_payload(identifier: str, title: str = "Add retry") -> dict:
     return {
         "data": {
@@ -104,11 +113,52 @@ def _issue_payload(identifier: str, title: str = "Add retry") -> dict:
                 "identifier": identifier,
                 "title": title,
                 "url": f"https://linear.app/acme/issue/{identifier}",
-                "description": "Acceptance: retries are bounded.",
+                "description": _DESCRIPTION,
+                "priorityLabel": "High",
                 "state": {"name": "In Progress"},
+                "assignee": {"displayName": "Matt"},
+                "labels": {"nodes": [{"name": "billing"}, {"name": "payments"}]},
+                "comments": {
+                    "nodes": [
+                        {"body": "Ship before Friday", "user": {"displayName": "Matt"}},
+                    ]
+                },
+                "children": {
+                    "nodes": [
+                        {
+                            "identifier": "ENG-483",
+                            "title": "Emit retry metrics",
+                            "state": {"name": "Todo"},
+                        }
+                    ]
+                },
             }
         }
     }
+
+
+class TestExtractAcceptanceCriteria:
+    def test_markdown_checkboxes(self):
+        text = "Intro\n\n- [ ] First thing\n- [x] Second thing\n"
+        assert extract_acceptance_criteria(text) == ["First thing", "Second thing"]
+
+    def test_heading_section_bullets(self):
+        text = "## Acceptance Criteria\n\n- retries bounded\n- errors surfaced\n\n## Notes\n- not a criterion\n"
+        assert extract_acceptance_criteria(text) == ["retries bounded", "errors surfaced"]
+
+    def test_numbered_requirements(self):
+        text = "## Requirements\n\n1. Cap retries\n2. Surface errors\n"
+        assert extract_acceptance_criteria(text) == ["Cap retries", "Surface errors"]
+
+    def test_checkboxes_win_over_section(self):
+        text = "## Acceptance Criteria\n\n- [ ] only this\n"
+        assert extract_acceptance_criteria(text) == ["only this"]
+
+    def test_no_criteria(self):
+        assert extract_acceptance_criteria("Just prose with no list.") == []
+
+    def test_empty_description(self):
+        assert extract_acceptance_criteria("") == []
 
 
 class TestLinearClient:
@@ -120,10 +170,21 @@ class TestLinearClient:
         )
         issues = await LinearClient("key").fetch_issues(["ENG-1"])
         assert len(issues) == 1
-        assert issues[0].identifier == "ENG-1"
-        assert issues[0].title == "Add retry"
-        assert issues[0].state == "In Progress"
-        assert "linear.app" in issues[0].url
+        issue = issues[0]
+        assert issue.identifier == "ENG-1"
+        assert issue.title == "Add retry"
+        assert issue.state == "In Progress"
+        assert "linear.app" in issue.url
+        # Full ticket context is captured, not just the description.
+        assert issue.criteria == [
+            "Retries are capped at RETRY_LIMIT",
+            "Terminal failures surface to the caller",
+        ]
+        assert issue.labels == ["billing", "payments"]
+        assert issue.priority == "High"
+        assert issue.assignee == "Matt"
+        assert issue.comments == ["Matt: Ship before Friday"]
+        assert issue.children == ["ENG-483: Emit retry metrics (Todo)"]
 
     async def test_skips_unknown_issue(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(linear_mod.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient({}))
@@ -192,3 +253,27 @@ class TestFormatIssuesContext:
         assert "Add retry" in text
         assert "In Progress" in text
         assert "Acceptance: bounded retries." in text
+
+    def test_includes_criteria_and_context(self):
+        from mira.models import LinkedIssue
+
+        text = format_issues_context(
+            [
+                LinkedIssue(
+                    identifier="ENG-9",
+                    title="Retries",
+                    criteria=["Retries are capped", "Failures surface"],
+                    labels=["billing"],
+                    priority="Urgent",
+                    comments=["Matt: ship it"],
+                    children=["ENG-10: Metrics (Todo)"],
+                )
+            ]
+        )
+        assert "Acceptance criteria (each must be satisfied):" in text
+        assert "- Retries are capped" in text
+        assert "- Failures surface" in text
+        assert "**Labels:** billing" in text
+        assert "**Priority:** Urgent" in text
+        assert "- ENG-10: Metrics (Todo)" in text
+        assert "- Matt: ship it" in text
