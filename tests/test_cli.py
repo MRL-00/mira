@@ -155,6 +155,31 @@ class TestFormatJson:
         data = json.loads(raw)
         assert data["walkthrough"]["effort"] is None
 
+    def test_json_includes_verdict_and_criteria(self):
+        from mira.models import TicketCriterion
+
+        result = _make_result(
+            comments=[_make_comment(severity=Severity.BLOCKER)],
+            ticket_criteria=[TicketCriterion("ENG-1", "Cap retries", "unmet", "nope")],
+        )
+        data = json.loads(_format_json(result))
+        assert data["verdict"]["label"] == "Request changes"
+        assert data["verdict"]["blockers"] == 1
+        assert data["verdict"]["unmet_criteria"] == 1
+        assert data["ticket_criteria"] == [
+            {
+                "issue": "ENG-1",
+                "criterion": "Cap retries",
+                "status": "unmet",
+                "evidence": "nope",
+            }
+        ]
+
+    def test_json_verdict_defaults(self):
+        data = json.loads(_format_json(_make_result()))
+        assert data["verdict"]["label"] == "Looks good to merge"
+        assert data["ticket_criteria"] == []
+
     def test_json_walkthrough_ungrouped_files(self):
         wt = WalkthroughResult(
             summary="Flat.",

@@ -15,7 +15,7 @@ from mira.config import load_config
 from mira.core.engine import ReviewEngine
 from mira.exceptions import MiraError
 from mira.llm import create_llm
-from mira.models import ReviewResult, Severity
+from mira.models import ReviewResult, Severity, derive_verdict
 
 
 def _format_text(result: ReviewResult) -> str:
@@ -100,8 +100,29 @@ def _format_json(result: ReviewResult) -> str:
             "sequence_diagram": result.walkthrough.sequence_diagram,
         }
 
+    verdict = derive_verdict(
+        result.comments,
+        result.walkthrough.confidence_score if result.walkthrough else None,
+        result.ticket_criteria,
+    )
+
     data = {
         "summary": result.summary,
+        "verdict": {
+            "label": verdict.label,
+            "blockers": len(verdict.blockers),
+            "warnings": len(verdict.warnings),
+            "unmet_criteria": len(verdict.unmet_criteria),
+        },
+        "ticket_criteria": [
+            {
+                "issue": c.issue,
+                "criterion": c.criterion,
+                "status": c.status,
+                "evidence": c.evidence,
+            }
+            for c in result.ticket_criteria
+        ],
         "walkthrough": walkthrough_data,
         "comments": [
             {
@@ -173,10 +194,11 @@ def review(
     no_walkthrough: bool,
 ) -> None:
     """Review a pull request or diff."""
+    # Logs go to stderr so `--output json`/text on stdout stays machine-parseable.
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(name)s %(levelname)s: %(message)s",
-        stream=sys.stdout,
+        stream=sys.stderr,
     )
 
     if not pr_url and not use_stdin:
