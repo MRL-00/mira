@@ -165,6 +165,9 @@ _CRITERION_GLYPH: dict[str, str] = {
 # of text; the inline comments remain the complete list.
 _VERDICT_LIST_LIMIT = 10
 
+# Cap the collapsed "What changed" list so a very large PR stays skimmable.
+_CHANGES_DISPLAY_LIMIT = 15
+
 
 def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
     """Format severity counts as a parenthetical breakdown, e.g. ' (1 blocker, 2 warnings)'."""
@@ -659,27 +662,48 @@ class WalkthroughResult:
         return lines
 
     def _render_changes(self) -> list[str]:
-        """Render per-file change descriptions grouped into logical cohorts."""
+        """Render per-file change descriptions grouped into logical cohorts.
+
+        Collapsed behind a ``<details>`` so a large PR's file list doesn't
+        dominate the comment — the summary and verdict stay above the fold —
+        and capped so a 100-file PR can't produce a wall of text.
+        """
         if not self.file_changes:
             return []
         grouped: dict[str, list[WalkthroughFileEntry]] = {}
         for entry in self.file_changes:
             grouped.setdefault(entry.group or "Other changes", []).append(entry)
 
-        lines = ["### What changed", ""]
+        total = len(self.file_changes)
+        lines = [
+            "<details>",
+            f"<summary><b>What changed</b> — {total} file{'s' if total != 1 else ''}</summary>",
+            "",
+        ]
+        rendered = 0
+        skipped = 0
         for group, entries in grouped.items():
-            lines.append(f"**{group}**")
-            lines.append("")
+            bullets: list[str] = []
             for entry in entries:
+                if rendered >= _CHANGES_DISPLAY_LIMIT:
+                    skipped += 1
+                    continue
                 change = _CHANGE_TYPE_NAME.get(entry.change_type, "Modified")
                 line = f"- **{change}** `{entry.path}`"
                 description = entry.description.strip()
                 if description:
                     line += f" — {description}"
-                lines.append(line)
+                bullets.append(line)
+                rendered += 1
+            if bullets:
+                lines.append(f"**{group}**")
+                lines.append("")
+                lines.extend(bullets)
+                lines.append("")
+        if skipped:
+            lines.append(f"_…and {skipped} more file{'s' if skipped != 1 else ''}_")
             lines.append("")
-        while lines and lines[-1] == "":
-            lines.pop()
+        lines.append("</details>")
         return lines
 
 

@@ -463,8 +463,9 @@ class TestReviewEngine:
         assert "Request changes" in final
         assert "Blockers — must fix before merge:" in final
         assert "`src/utils.py:16`" in final
-        # File descriptions from the walkthrough response are rendered too.
-        assert "### What changed" in final
+        # File descriptions from the walkthrough response are rendered too
+        # (collapsed behind "What changed").
+        assert "What changed" in final
         assert "src/utils.py" in final
 
     @pytest.mark.asyncio
