@@ -449,6 +449,33 @@ class TestWalkthroughToMarkdown:
         assert "### Sequence Diagram" not in md
         assert "```mermaid" not in md
 
+    def test_change_map_rendered_without_sequence_diagram(self):
+        """The deterministic map keeps a Mermaid diagram in every walkthrough."""
+        result = WalkthroughResult(
+            summary="Changes.",
+            file_changes=[
+                WalkthroughFileEntry("a.py", FileChangeType.MODIFIED, "x", "Core"),
+                WalkthroughFileEntry("b.py", FileChangeType.ADDED, "y", "Tests"),
+            ],
+        )
+        md = result.to_markdown()
+        assert "```mermaid" in md
+        assert 'pr["Pull request"]' in md
+        assert 'f0["a.py"]' in md
+        assert 'f1["b.py"]' in md
+
+    def test_sequence_diagram_wins_over_change_map(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            sequence_diagram="graph LR\n  a-->b",
+            file_changes=[
+                WalkthroughFileEntry("a.py", FileChangeType.MODIFIED, "x", "Core"),
+            ],
+        )
+        md = result.to_markdown()
+        assert md.count("```mermaid") == 1
+        assert "a-->b" in md
+
     def test_with_confidence_score(self):
         from mira.models import WalkthroughConfidenceScore
 

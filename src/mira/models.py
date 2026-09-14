@@ -168,6 +168,9 @@ _VERDICT_LIST_LIMIT = 10
 # Cap the collapsed "What changed" list so a very large PR stays skimmable.
 _CHANGES_DISPLAY_LIMIT = 15
 
+# Cap the deterministic change-map diagram so it stays readable on large PRs.
+_CHANGE_MAP_LIMIT = 12
+
 # Canonical verdict labels. The walkthrough headline, the review-body verdict
 # row, the posted review event, and the GitHub check-run conclusion all key off
 # these, so one review can never show two different verdicts.
@@ -428,6 +431,13 @@ class WalkthroughResult:
                 parts.append("```mermaid")
                 parts.append(diagram)
                 parts.append("```")
+        else:
+            # No LLM diagram: fall back to the deterministic change map so every
+            # walkthrough still shows how the change fits together.
+            change_map = self._render_change_map()
+            if change_map:
+                parts.append("")
+                parts.extend(change_map)
 
         issue_lines = self._render_linked_issues(linked_issues, require_issue)
         if issue_lines:
@@ -563,6 +573,37 @@ class WalkthroughResult:
         )
 
         return "\n".join(parts)
+
+    def _render_change_map(self) -> list[str]:
+        """Deterministic Mermaid map of the changed files, grouped by cohort.
+
+        Used when the model produced no sequence diagram, so the walkthrough
+        always shows how the pieces relate. Capped so a 100-file PR can't
+        produce an unreadable diagram.
+        """
+        if not self.file_changes:
+            return []
+
+        entries = self.file_changes[:_CHANGE_MAP_LIMIT]
+        group_ids: dict[str, str] = {}
+        lines = ["flowchart LR", '  pr["Pull request"]']
+        for index, entry in enumerate(entries):
+            group = entry.group.strip() or "Changed files"
+            if group not in group_ids:
+                group_id = f"g{len(group_ids)}"
+                group_ids[group] = group_id
+                safe_group = " ".join(group.split()).replace('"', "'")
+                lines.append(f'  {group_id}["{safe_group}"]')
+                lines.append(f"  pr --> {group_id}")
+            file_id = f"f{index}"
+            safe_path = entry.path.replace('"', "'")
+            lines.append(f'  {file_id}["{safe_path}"]')
+            lines.append(f"  {group_ids[group]} --> {file_id}")
+        remaining = len(self.file_changes) - len(entries)
+        if remaining:
+            lines.append(f'  more["+{remaining} more files"]')
+            lines.append("  pr --> more")
+        return ["```mermaid", *lines, "```"]
 
     def _render_verdict(
         self,

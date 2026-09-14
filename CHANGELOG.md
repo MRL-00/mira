@@ -19,7 +19,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Walkthrough confidence reasons are specific.** When a blocker or warning tightens the confidence score, the reason now names the findings instead of reporting only a count, and a score with no reason falls back to a concrete summary.
 - **One verdict per review, and it is honest about the ticket.** The verdict is derived once (findings + ticket criteria) and drives the walkthrough headline, the review-body row, the posted review event, and the check-run conclusion, so they can no longer disagree. CI status no longer decides the verdict. A PR whose linked ticket Mira *could not read* is never approved: it reports `Needs review` and says why (missing API key, API error, ticket not found/visible), instead of a bare "no findings".
-- **The review body no longer repeats the walkthrough.** It is now a compact status card — CI, docs, ticket verification, and the verdict, plus the inline-findings pointer — because the summary, verdict rationale, Mermaid change map, and per-file detail already live in the walkthrough comment. This removes the second near-identical wall of text on every PR.
+- **The review body no longer repeats the walkthrough.** It is now a compact status card — CI, docs, ticket verification, and the verdict, plus the inline-findings pointer — because the summary, verdict rationale, Mermaid map, and per-file detail already live in the walkthrough comment. This removes the second near-identical wall of text on every PR. The deterministic change map (the Mermaid diagram of how the changed files group together) moved into the walkthrough, so every review keeps a diagram even when the model produces no sequence diagram.
 
 ### Fixed
 
