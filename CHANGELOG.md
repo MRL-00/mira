@@ -4,18 +4,6 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added
-
-- **Verdict-first walkthroughs.** The PR walkthrough now opens with an explicit merge verdict (`Request changes` / `Needs review` / `Looks good to merge`) derived from the findings that actually got posted, followed by the exact blockers and warnings — `path:line` and title — that justify it. A "request changes" verdict can no longer appear without naming what has to change, and the confidence score's rationale is shown inline instead of hidden behind a collapsed block.
-- **"What changed" file descriptions.** The walkthrough lists each changed file with its cohort, change type, and a specific description. The walkthrough prompt is now fed bounded diff excerpts (`review.walkthrough_diff_budget`, default 40k chars) rather than filenames alone, so descriptions and the Mermaid flow diagram reflect the actual code.
-- **Linear issue linking.** Mira extracts issue identifiers (e.g. `ENG-123`) from the PR title, description, and branch, fetches them from Linear, gives the reviewer the ticket's intent to check the change against, and links them in the walkthrough. Configure with `linear.enabled`, `linear.team_keys`, and `linear.require_issue`; set `MIRA_LINEAR_TOKEN` to enable it. Best-effort — a missing key or API failure never blocks a review.
-
-### Changed
-
-- **Walkthrough confidence reasons are specific.** When a blocker or warning tightens the confidence score, the reason now names the findings instead of reporting only a count, and a score with no reason falls back to a concrete summary.
-
 ## [0.8.0] — 2026-07-27
 
 ### Added

@@ -33,7 +33,6 @@ from mira.exceptions import MiraError, ResponseParseError
 from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
-from mira.linear import format_issues_context, resolve_linked_issues
 from mira.llm.prompts.review import (
     build_review_prompt,
     build_walkthrough_prompt,
@@ -86,19 +85,6 @@ def _audit_stage(audit: list[dict], stage: str, before: list, after: list) -> No
     audit.extend(_audit_drop(c, stage) for c in before if id(c) not in kept)
 
 
-_REASON_FINDING_LIMIT = 5
-
-
-def _format_findings_for_reason(comments: list[ReviewComment]) -> str:
-    """Summarize findings for a confidence reason: ``Title (`path:line`)``."""
-    shown = comments[:_REASON_FINDING_LIMIT]
-    parts = [f"{c.title.strip() or 'issue'} (`{c.path}:{c.line}`)" for c in shown]
-    remaining = len(comments) - len(shown)
-    if remaining > 0:
-        parts.append(f"and {remaining} more")
-    return "; ".join(parts)
-
-
 def _clamp_confidence_to_findings(
     walkthrough: WalkthroughResult,
     comments: list[ReviewComment],
@@ -117,36 +103,21 @@ def _clamp_confidence_to_findings(
     if cs is None:
         return
 
-    blocker_comments = [c for c in comments if c.severity == Severity.BLOCKER]
-    warning_comments = [c for c in comments if c.severity == Severity.WARNING]
-    blockers = len(blocker_comments)
-    warnings = len(warning_comments)
+    blockers = sum(1 for c in comments if c.severity == Severity.BLOCKER)
+    warnings = sum(1 for c in comments if c.severity == Severity.WARNING)
     original = cs.score
 
     if blockers > 0 and cs.score > 2:
         cs.score = 2
-        cs.label = "Request changes"
+        cs.label = "Do not merge"
         cs.reason = (
             f"Found {blockers} blocker{'s' if blockers != 1 else ''} "
-            f"that must be fixed before merge: {_format_findings_for_reason(blocker_comments)}."
+            "that must be fixed before merge."
         )
     elif warnings >= 3 and cs.score > 3:
         cs.score = 3
         cs.label = "Needs review"
-        cs.reason = (
-            f"Found {warnings} warnings that need attention before merge: "
-            f"{_format_findings_for_reason(warning_comments)}."
-        )
-
-    # A score without a reason is the exact complaint this section exists to
-    # fix — always leave the reader something concrete to act on.
-    if not cs.reason.strip():
-        if blocker_comments:
-            cs.reason = f"Blockers found: {_format_findings_for_reason(blocker_comments)}."
-        elif warning_comments:
-            cs.reason = f"Warnings found: {_format_findings_for_reason(warning_comments)}."
-        else:
-            cs.reason = "No blockers or warnings found in the changed code."
+        cs.reason = f"Found {warnings} warnings that need attention before merge."
 
     if cs.score != original:
         logger.info(
@@ -552,10 +523,6 @@ class ReviewEngine:
         pr_info = await self.provider.get_pr_info(pr_url)
         self._pr_info = pr_info
 
-        # Tracker lookup runs alongside the review — it only needs the PR
-        # metadata, and a slow/unconfigured Linear must never delay the diff.
-        linked_issues_task = _asyncio.create_task(resolve_linked_issues(pr_info, self.config))
-
         async def _resolve_threads() -> tuple[
             int, int, list[UnresolvedThread], list[ThreadDecision]
         ]:
@@ -579,11 +546,6 @@ class ReviewEngine:
         )
 
         threads_checked, llm_resolved, unresolved_threads, thread_decisions = thread_result
-
-        linked_issues = []
-        with contextlib.suppress(Exception):
-            linked_issues = await linked_issues_task
-        linked_issues_context = format_issues_context(linked_issues)
 
         _lines_changed = sum(
             1 for line in diff_text.splitlines() if line.startswith("+") or line.startswith("-")
@@ -725,7 +687,6 @@ class ReviewEngine:
                 review_round=review_round,
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
-                linked_issues_context=linked_issues_context,
             )
         except BaseException as exc:
             if overlap_task is not None:
@@ -875,11 +836,6 @@ class ReviewEngine:
                         index_was_empty=getattr(self, "_index_was_empty", False),
                         dashboard_url=_os.environ.get("MIRA_DASHBOARD_URL", ""),
                         overlaps=overlaps or None,
-                        comments=result.comments,
-                        linked_issues=linked_issues or None,
-                        require_issue=self.config.linear.require_issue,
-                        additions=result.additions,
-                        deletions=result.deletions,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -1054,7 +1010,6 @@ class ReviewEngine:
         review_round: int = 1,
         resolved_threads: list[dict] | None = None,
         team_conventions: str = "",
-        linked_issues_context: str = "",
     ) -> ReviewResult:
         """Core review pipeline.
 
@@ -1341,7 +1296,6 @@ class ReviewEngine:
                         review_round=review_round,
                         resolved_threads=resolved_threads,
                         team_conventions=team_conventions,
-                        linked_issues_context=linked_issues_context,
                     )
 
                     def _parse(raw: str) -> tuple[list[ReviewComment], list[KeyIssue], str]:
@@ -1626,8 +1580,6 @@ class ReviewEngine:
             key_issues=all_key_issues,
             summary=summary,
             reviewed_files=len(filtered),
-            additions=sum(f.added_lines for f in filtered),
-            deletions=sum(f.deleted_lines for f in filtered),
             token_usage=self.llm.usage,
             walkthrough=walkthrough,
             reviewed_paths=selected_paths,

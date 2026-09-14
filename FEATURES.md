@@ -6,9 +6,6 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 
 - AI-powered inline PR comments with severity and confidence scoring
 - PR walkthroughs / summaries with file coverage, comment breakdown, and per-severity stats
-- Verdict-first walkthrough: an explicit merge verdict (`Request changes` / `Needs review` / `Looks good to merge`) derived from the posted findings, with the exact blockers and warnings listed
-- Per-file "What changed" descriptions grounded in bounded diff excerpts, grouped into logical cohorts
-- Mermaid flow diagram showing how the changed files relate
 - Streaming walkthrough: placeholder posts within ~1s, narrative within ~10s, full review within a minute
 - Multi-file reasoning across a diff
 - Parallel chunk review (`asyncio.gather` with configurable concurrency)
@@ -59,7 +56,6 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 - One `mira serve` deployment reviews on any combination of platforms, each on its own webhook route
 - Bot chat: mention the bot on any PR or MR to ask questions
 - Cancel-in-progress indexing from the UI
-- **Linear issue linking** — detects `ENG-123`-style references in the PR title, description, and branch, gives the reviewer the ticket's intent to verify the change against, and links the issues in the walkthrough (`MIRA_LINEAR_TOKEN`)
 
 ## Bring your own LLM
 

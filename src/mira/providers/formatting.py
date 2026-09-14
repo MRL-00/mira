@@ -121,7 +121,7 @@ def format_key_issues(key_issues: list[KeyIssue]) -> str:
         "|---|---|---|",
     ]
     for ki in key_issues:
-        lines.append(f"| \U0001f534 | {ki.issue} | `{ki.path}:{ki.line}` |")
+        lines.append(f"| :red_circle: | {ki.issue} | `{ki.path}:{ki.line}` |")
     return "\n".join(lines)
 
 

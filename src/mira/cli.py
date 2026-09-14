@@ -37,13 +37,7 @@ def _format_text(result: ReviewResult) -> str:
         lines.append("")
 
     if result.walkthrough:
-        lines.append(
-            result.walkthrough.to_markdown(
-                comments=result.comments,
-                additions=result.additions,
-                deletions=result.deletions,
-            )
-        )
+        lines.append(result.walkthrough.to_markdown())
         lines.append("")
         lines.append("---")
         lines.append("")

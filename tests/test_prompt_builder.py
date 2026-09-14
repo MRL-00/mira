@@ -46,24 +46,6 @@ class TestBuildReviewPrompt:
         assert "submit_review" in system
         assert "blocker" in system
 
-    def test_includes_linked_issues_context(self):
-        files = [
-            FileDiff(
-                path="test.py",
-                change_type=FileChangeType.MODIFIED,
-                hunks=[HunkInfo(1, 5, 1, 5, "content")],
-                language="python",
-                added_lines=1,
-                deleted_lines=0,
-            )
-        ]
-        messages = build_review_prompt(
-            files,
-            MiraConfig(),
-            linked_issues_context="## Linked Issues\n\n### ENG-1 — Add retry",
-        )
-        assert "ENG-1 — Add retry" in messages[0]["content"]
-
     def test_includes_file_paths(self):
         files = [
             FileDiff(
