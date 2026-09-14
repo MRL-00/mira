@@ -248,7 +248,10 @@ SUBMIT_WALKTHROUGH_TOOL = {
                 },
                 "sequence_diagram": {
                     "type": ["string", "null"],
-                    "description": "Mermaid sequence diagram or null.",
+                    "description": (
+                        "A Mermaid `graph LR` flow diagram showing how the changed files "
+                        "relate (imports/data flow), or null when the changes are unrelated."
+                    ),
                 },
             },
             "required": ["summary", "change_groups"],

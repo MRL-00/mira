@@ -141,6 +141,25 @@ class ReviewComment:
     source_pass: str = "main"
 
 
+_SEVERITY_NAME: dict[Severity, str] = {
+    Severity.BLOCKER: "blocker",
+    Severity.WARNING: "warning",
+    Severity.SUGGESTION: "suggestion",
+    Severity.NITPICK: "nitpick",
+}
+
+_CHANGE_TYPE_NAME: dict[FileChangeType, str] = {
+    FileChangeType.ADDED: "Added",
+    FileChangeType.MODIFIED: "Modified",
+    FileChangeType.DELETED: "Deleted",
+    FileChangeType.RENAMED: "Renamed",
+}
+
+# Cap per verdict section so a noisy PR can't turn the walkthrough into a wall
+# of text; the inline comments remain the complete list.
+_VERDICT_LIST_LIMIT = 10
+
+
 def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
     """Format severity counts as a parenthetical breakdown, e.g. ' (1 blocker, 2 warnings)'."""
     labels = {
@@ -158,6 +177,20 @@ def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
     return f" ({', '.join(items)})" if items else ""
 
 
+def _format_finding_lines(comments: list[ReviewComment]) -> list[str]:
+    """Render findings as ``- `path:line` — Title (severity)`` bullets."""
+    lines: list[str] = []
+    for c in comments[:_VERDICT_LIST_LIMIT]:
+        title = c.title.strip() or "Issue"
+        severity = _SEVERITY_NAME.get(c.severity, "")
+        suffix = f" *({severity})*" if severity else ""
+        lines.append(f"- `{c.path}:{c.line}` — {title}{suffix}")
+    remaining = len(comments) - _VERDICT_LIST_LIMIT
+    if remaining > 0:
+        lines.append(f"- _…and {remaining} more (see inline comments)_")
+    return lines
+
+
 @dataclass
 class WalkthroughConfidenceScore:
     """Confidence score for merge readiness."""
@@ -165,6 +198,69 @@ class WalkthroughConfidenceScore:
     score: int
     label: str
     reason: str
+
+
+@dataclass
+class Verdict:
+    """Merge recommendation derived from the findings that actually got posted.
+
+    The walkthrough headline and the "required changes" list are computed from
+    the final inline comments, so a "Request changes" verdict always names what
+    must change instead of leaving the reader with a bare label.
+    """
+
+    label: str
+    emoji: str
+    blockers: list[ReviewComment] = field(default_factory=list)
+    warnings: list[ReviewComment] = field(default_factory=list)
+    optional: list[ReviewComment] = field(default_factory=list)
+
+    @property
+    def has_findings(self) -> bool:
+        return bool(self.blockers or self.warnings)
+
+
+def derive_verdict(
+    comments: list[ReviewComment] | None,
+    confidence_score: WalkthroughConfidenceScore | None = None,
+) -> Verdict:
+    """Derive a merge verdict from the findings that survived filtering.
+
+    Blockers force "Request changes"; warnings (or a low confidence score)
+    give "Needs review"; anything else is safe to merge. Each bucket keeps the
+    comments themselves so callers can list exactly what has to change.
+    """
+    filed = comments or []
+    blockers = [c for c in filed if c.severity == Severity.BLOCKER]
+    warnings = [c for c in filed if c.severity == Severity.WARNING]
+    optional = [c for c in filed if c.severity <= Severity.SUGGESTION]
+
+    if blockers:
+        label, emoji = "Request changes", "\U0001f6d1"
+    elif warnings or (confidence_score is not None and confidence_score.score <= 2):
+        label, emoji = "Needs review", "\u26a0\ufe0f"
+    else:
+        label, emoji = "Looks good to merge", "\u2705"
+
+    return Verdict(
+        label=label,
+        emoji=emoji,
+        blockers=blockers,
+        warnings=warnings,
+        optional=optional,
+    )
+
+
+@dataclass
+class LinkedIssue:
+    """A tracker issue (e.g. Linear) referenced by the pull request."""
+
+    identifier: str
+    title: str = ""
+    url: str = ""
+    state: str = ""
+    description: str = ""
+    source: str = "linear"
 
 
 @dataclass
@@ -212,10 +308,36 @@ class WalkthroughResult:
         dashboard_url: str = "",
         overlaps: list[OverlapFinding] | None = None,
         failure_notice: str | None = None,
+        comments: list[ReviewComment] | None = None,
+        linked_issues: list[LinkedIssue] | None = None,
+        require_issue: bool = False,
+        additions: int = 0,
+        deletions: int = 0,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
         parts.append(self.summary)
+
+        # "At a glance" line — how big the review is and how long it should
+        # take. The model already produces the effort estimate; render it
+        # instead of dropping it on the floor.
+        if self.effort and not in_progress and not failure_notice:
+            effort = self.effort
+            parts.append("")
+            line = f"\u23f1\ufe0f **Estimated review effort:** {effort.label} ({effort.level}/5)"
+            if effort.minutes:
+                line += f" \u00b7 ~{effort.minutes} min"
+            parts.append(line)
+
+        # The verdict and the changes it demands come first — a reader should
+        # never have to open a collapsed block to learn why a PR needs work.
+        # Suppressed during the in-progress render (findings aren't known yet)
+        # and on failure (a "looks good" next to a failure notice is wrong).
+        if not in_progress and not failure_notice:
+            verdict_lines = self._render_verdict(comments, key_issues)
+            if verdict_lines:
+                parts.append("")
+                parts.extend(verdict_lines)
 
         if self.sequence_diagram:
             diagram = self.sequence_diagram.strip()
@@ -229,26 +351,15 @@ class WalkthroughResult:
                 parts.append(diagram)
                 parts.append("```")
 
-        if self.confidence_score:
-            cs = self.confidence_score
-            score = cs.score
-            filled = "\u25c9" * score  # ◉
-            empty = "\u25cb" * (5 - score)  # ○
-            label = cs.label if cs.label else ""
+        issue_lines = self._render_linked_issues(linked_issues, require_issue)
+        if issue_lines:
             parts.append("")
-            parts.append(
-                f"<details>\n"
-                f"<summary><b>Confidence: {score}/5</b> &nbsp; {filled}{empty} &nbsp; {label}</summary>\n"
-            )
-            if cs.reason:
-                parts.append(f"- {cs.reason}")
-            if key_issues:
-                parts.append("")
-                parts.append("**Key files to review:**")
-                for ki in key_issues:
-                    parts.append(f"- `{ki.path}:{ki.line}` — {ki.issue}")
+            parts.extend(issue_lines)
+
+        changes_lines = self._render_changes()
+        if changes_lines:
             parts.append("")
-            parts.append("</details>")
+            parts.extend(changes_lines)
 
         if overlaps:
             _kind_label = {
@@ -300,6 +411,9 @@ class WalkthroughResult:
                 stats_parts.append(
                     f"{reviewed_files} file{'s' if reviewed_files != 1 else ''} reviewed"
                 )
+            if additions or deletions:
+                diffstat = f"+{additions} \u2212{deletions}"
+                stats_parts.append(f"`{diffstat}`")
             if total_comments:
                 comment_detail = _format_stats_breakdown(review_stats) if review_stats else ""
                 stats_parts.append(
@@ -367,6 +481,123 @@ class WalkthroughResult:
 
         return "\n".join(parts)
 
+    def _render_verdict(
+        self,
+        comments: list[ReviewComment] | None,
+        key_issues: list[KeyIssue] | None,
+    ) -> list[str]:
+        """Render the verdict headline plus exactly what must change.
+
+        The headline is derived from the final findings rather than the model's
+        free-form label, so a "Request changes" verdict is always accompanied by
+        the blocker/warning list that justifies it.
+        """
+        cs = self.confidence_score
+        verdict = derive_verdict(comments, cs)
+
+        # Nothing to say: no score, no findings, no key issues.
+        has_findings = bool(verdict.blockers or verdict.warnings or verdict.optional)
+        if cs is None and not has_findings and not key_issues:
+            return []
+
+        lines = [f"## Verdict: {verdict.emoji} {verdict.label}", ""]
+        if cs is not None:
+            filled = "\u25c9" * cs.score  # ◉
+            empty = "\u25cb" * (5 - cs.score)  # ○
+            line = f"{filled}{empty} **{cs.score}/5 confidence**"
+            reason = cs.reason.strip()
+            if reason:
+                line += f" — {reason}"
+            lines.append(line)
+            lines.append("")
+
+        if verdict.blockers:
+            lines.append("**Blockers — must fix before merge:**")
+            lines.append("")
+            lines.extend(_format_finding_lines(verdict.blockers))
+            lines.append("")
+        if verdict.warnings:
+            lines.append("**Warnings — should fix before merge:**")
+            lines.append("")
+            lines.extend(_format_finding_lines(verdict.warnings))
+            lines.append("")
+
+        # Fall back to the model's key issues when no inline survived filtering
+        # (older callers pass only key_issues).
+        if not verdict.has_findings and key_issues:
+            lines.append("**Key files to review:**")
+            lines.append("")
+            for ki in key_issues[:_VERDICT_LIST_LIMIT]:
+                lines.append(f"- `{ki.path}:{ki.line}` — {ki.issue}")
+            lines.append("")
+
+        if verdict.optional:
+            lines.append("<details>")
+            lines.append(
+                f"<summary><b>Optional suggestions ({len(verdict.optional)})</b></summary>"
+            )
+            lines.append("")
+            lines.extend(_format_finding_lines(verdict.optional))
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
+
+        while lines and lines[-1] == "":
+            lines.pop()
+        return lines
+
+    def _render_linked_issues(
+        self,
+        linked_issues: list[LinkedIssue] | None,
+        require_issue: bool,
+    ) -> list[str]:
+        """Render the tracker issues this PR references, if any."""
+        issues = linked_issues or []
+        if not issues and not require_issue:
+            return []
+
+        lines = ["### Linked issues", ""]
+        if not issues:
+            lines.append(
+                "- _No linked issue found in the PR title, description, or branch. "
+                "Link the tracked ticket so reviewers can verify intent._"
+            )
+            return lines
+
+        for issue in issues:
+            label = f"[{issue.identifier}]({issue.url})" if issue.url else f"`{issue.identifier}`"
+            line = f"- {label}"
+            if issue.title:
+                line += f" — {issue.title}"
+            if issue.state:
+                line += f" *({issue.state})*"
+            lines.append(line)
+        return lines
+
+    def _render_changes(self) -> list[str]:
+        """Render per-file change descriptions grouped into logical cohorts."""
+        if not self.file_changes:
+            return []
+        grouped: dict[str, list[WalkthroughFileEntry]] = {}
+        for entry in self.file_changes:
+            grouped.setdefault(entry.group or "Other changes", []).append(entry)
+
+        lines = ["### What changed", ""]
+        for group, entries in grouped.items():
+            lines.append(f"**{group}**")
+            lines.append("")
+            for entry in entries:
+                change = _CHANGE_TYPE_NAME.get(entry.change_type, "Modified")
+                line = f"- **{change}** `{entry.path}`"
+                description = entry.description.strip()
+                if description:
+                    line += f" — {description}"
+                lines.append(line)
+            lines.append("")
+        while lines and lines[-1] == "":
+            lines.pop()
+        return lines
+
 
 @dataclass
 class ThreadDecision:
@@ -391,6 +622,9 @@ class ReviewResult:
     token_usage: dict[str, int] = field(default_factory=dict)
     walkthrough: WalkthroughResult | None = None
     thread_decisions: list[ThreadDecision] = field(default_factory=list)
+    # Line counts across the files actually reviewed, for the walkthrough header.
+    additions: int = 0
+    deletions: int = 0
     # Surfaced in the walkthrough banner so @miracodeai review-rest can target the rest.
     reviewed_paths: list[str] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)
