@@ -16,6 +16,7 @@ from mira.core.engine import (
     _diff_line_map,
     _drop_orphan_key_issues,
     _drop_unanchorable_comments,
+    _outstanding_comments,
     _restrict_diff_to_paths,
     _security_relevant_files,
 )
@@ -252,6 +253,60 @@ class TestReviewEngine:
         assert any(
             "Could not read EPIC-1113" in body and "no Linear API key set" in body
             for body in bodies
+        ), bodies
+
+    @pytest.mark.asyncio
+    async def test_open_blocker_from_an_earlier_review_still_blocks(self, mock_provider: AsyncMock):
+        """A re-review that finds nothing new must not clear an open blocker.
+
+        Mira doesn't re-draft a finding it already posted, so the verdict has to
+        read the open threads — otherwise a PR with its own unresolved blocker
+        comes back as "Looks good to merge".
+        """
+        comment_body = (
+            "**Bug**  \n"
+            "🛑 Blocker — must fix before merge\n"
+            "\n"
+            "**[HIGH] ReloadAsync on an untracked entity will throw**\n"
+            "\n"
+            "The activity passed in is detached, so the reload throws.\n"
+        )
+        mock_provider.get_unresolved_bot_threads = AsyncMock(
+            return_value=[
+                UnresolvedThread(
+                    thread_id="T1",
+                    path="src/utils.py",
+                    line=1,
+                    body=comment_body,
+                )
+            ]
+        )
+        llm = MagicMock(spec=LLMProvider)
+        no_comments = json.dumps(
+            {"comments": [], "summary": "All good!", "metadata": {"reviewed_files": 1}}
+        )
+        llm.review = AsyncMock(return_value=no_comments)
+        llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
+        llm.complete = AsyncMock(
+            return_value=json.dumps({"results": [{"id": "T1", "fixed": False}]})
+        )
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        mock_provider.get_file_content = AsyncMock(return_value="import os\nx = 1\ny = 2\n")
+        mock_provider.resolve_threads = AsyncMock(return_value=0)
+
+        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider, bot_name="mira")
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        assert mock_provider.post_review.await_args.kwargs["verdict_label"] == "Request changes"
+        assert mock_provider.post_check_run.await_args.args[2] == "Request changes"
+        bodies = [call.args[1] for call in mock_provider.post_comment.await_args_list] + [
+            call.args[2] for call in mock_provider.update_comment.await_args_list
+        ]
+        assert any(
+            "still open from an earlier review" in b
+            and "ReloadAsync on an untracked entity will throw" in b
+            for b in bodies
         ), bodies
 
     @pytest.mark.asyncio
@@ -1073,6 +1128,61 @@ class TestDryRun:
 
         # Result should still be populated
         assert result is not None
+
+
+class TestOutstandingComments:
+    """Mira's open threads are rebuilt as findings so they keep blocking."""
+
+    def _thread(self, body: str, **kwargs) -> UnresolvedThread:
+        return UnresolvedThread(
+            thread_id=kwargs.pop("thread_id", "T1"),
+            path=kwargs.pop("path", "a.py"),
+            line=kwargs.pop("line", 3),
+            body=body,
+            **kwargs,
+        )
+
+    def test_parses_severity_category_and_title(self):
+        outstanding = _outstanding_comments(
+            [
+                self._thread(
+                    "**Bug**  \n"
+                    "🛑 Blocker — must fix before merge\n"
+                    "\n"
+                    "**[HIGH] ReloadAsync will throw**\n"
+                    "\n"
+                    "details\n"
+                )
+            ]
+        )
+
+        assert len(outstanding) == 1
+        comment = outstanding[0]
+        assert comment.path == "a.py"
+        assert comment.line == 3
+        assert comment.severity == Severity.BLOCKER
+        assert comment.category == "bug"
+        assert comment.title == "[HIGH] ReloadAsync will throw"
+        assert comment.source_pass == "outstanding"
+
+    def test_parses_a_warning(self):
+        outstanding = _outstanding_comments(
+            [self._thread("**Maintainability**  \n💡 Suggestion\n\n**Centralize the literal**\n")]
+        )
+        assert outstanding[0].severity == Severity.SUGGESTION
+
+    def test_skips_outdated_and_unlocatable_threads(self):
+        threads = [
+            self._thread("**Bug**  \n🛑 Blocker\n\n**Old**\n", thread_id="T1", is_outdated=True),
+            self._thread("**Bug**  \n🛑 Blocker\n\n**Moved**\n", thread_id="T2", line=0),
+        ]
+        assert _outstanding_comments(threads) == []
+
+    def test_unparseable_body_still_yields_a_finding(self):
+        outstanding = _outstanding_comments([self._thread("just some text")])
+        assert len(outstanding) == 1
+        assert outstanding[0].title == "Unresolved finding"
+        assert outstanding[0].severity == Severity.SUGGESTION
 
 
 class TestExtractSections:

@@ -612,6 +612,31 @@ class TestWalkthroughToMarkdown:
         assert "Optional suggestions (1)" in md
         assert "<details>" in md
 
+    def test_outstanding_findings_are_flagged(self):
+        """A carried blocker must be announced, not just listed."""
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            verdict=Verdict(
+                label="Request changes",
+                emoji="\U0001f6d1",
+                blockers=[
+                    ReviewComment(
+                        path="a.py",
+                        line=383,
+                        end_line=None,
+                        severity=Severity.BLOCKER,
+                        category="bug",
+                        title="ReloadAsync will throw",
+                        body="",
+                        confidence=0.0,
+                    )
+                ],
+            ),
+            outstanding_count=1,
+        )
+        assert "1 finding below is still open from an earlier review" in md
+        assert "`a.py:383` — ReloadAsync will throw" in md
+
     def test_changes_section_groups_files(self):
         result = WalkthroughResult(
             summary="Changes.",
@@ -831,6 +856,49 @@ class TestDeriveReviewVerdict:
         )
         assert derive_review_verdict(result).label == "Looks good to merge"
         assert ticket_unverified_note(result) == ""
+
+    def test_open_blocker_from_an_earlier_review_keeps_blocking(self):
+        """A re-review that finds nothing new can't upgrade an open blocker."""
+        result = ReviewResult(
+            summary="ok",
+            outstanding_comments=[
+                ReviewComment(
+                    path="a.py",
+                    line=383,
+                    end_line=None,
+                    severity=Severity.BLOCKER,
+                    category="bug",
+                    title="ReloadAsync on an untracked entity will throw",
+                    body="",
+                    confidence=0.0,
+                    source_pass="outstanding",
+                )
+            ],
+        )
+        verdict = derive_review_verdict(result)
+        assert verdict.label == "Request changes"
+        assert [c.title for c in verdict.blockers] == [
+            "ReloadAsync on an untracked entity will throw"
+        ]
+
+    def test_open_warning_from_an_earlier_review_needs_review(self):
+        result = ReviewResult(
+            summary="ok",
+            outstanding_comments=[
+                ReviewComment(
+                    path="a.py",
+                    line=1,
+                    end_line=None,
+                    severity=Severity.WARNING,
+                    category="bug",
+                    title="Open warning",
+                    body="",
+                    confidence=0.0,
+                    source_pass="outstanding",
+                )
+            ],
+        )
+        assert derive_review_verdict(result).label == "Needs review"
 
 
 class TestLinearTicketStatusRow:

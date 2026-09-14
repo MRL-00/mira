@@ -283,9 +283,14 @@ def derive_review_verdict(result: ReviewResult) -> Verdict:
     for, so an unverifiable ticket can never be approved — it downgrades an
     otherwise-clean review to "Needs review" with the reason shown, instead of
     silently reporting a bare "no findings".
+
+    Findings already posted and still open count too (``outstanding_comments``):
+    a re-review that finds nothing new must not upgrade a PR whose blocker is
+    still unresolved.
     """
     confidence = result.walkthrough.confidence_score if result.walkthrough else None
-    verdict = derive_verdict(result.comments, confidence, result.ticket_criteria)
+    filed = [*result.comments, *result.outstanding_comments]
+    verdict = derive_verdict(filed, confidence, result.ticket_criteria)
     if not verdict.has_findings and result.linear_lookup_status == "unavailable":
         return Verdict(label=VERDICT_NEEDS_REVIEW, emoji="\u26a0\ufe0f")
     return verdict
@@ -444,6 +449,7 @@ class WalkthroughResult:
         verdict: Verdict | None = None,
         verdict_note: str = "",
         status_rows: list[tuple[str, str]] | None = None,
+        outstanding_count: int = 0,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -466,7 +472,7 @@ class WalkthroughResult:
         # and on failure (a "looks good" next to a failure notice is wrong).
         if not in_progress and not failure_notice:
             verdict_lines = self._render_verdict(
-                comments, key_issues, ticket_criteria, verdict, verdict_note
+                comments, key_issues, ticket_criteria, verdict, verdict_note, outstanding_count
             )
             if verdict_lines:
                 parts.append("")
@@ -674,6 +680,7 @@ class WalkthroughResult:
         ticket_criteria: list[TicketCriterion] | None = None,
         verdict: Verdict | None = None,
         note: str = "",
+        outstanding_count: int = 0,
     ) -> list[str]:
         """Render the verdict headline plus exactly what must change.
 
@@ -706,6 +713,14 @@ class WalkthroughResult:
             lines.append("")
         if note:
             lines.append(f"> {note}")
+            lines.append("")
+        if outstanding_count:
+            lines.append(
+                f"> **{outstanding_count} finding"
+                f"{'s' if outstanding_count != 1 else ''} below "
+                f"{'are' if outstanding_count != 1 else 'is'} still open from an earlier "
+                "review on this PR** — resolve the thread once it's fixed."
+            )
             lines.append("")
 
         if verdict.blockers:
@@ -901,6 +916,12 @@ class ReviewResult:
     # Why a referenced ticket could not be graded (missing key, API error, not
     # found), shown next to the "Unknown" verdict so it is actionable.
     linear_lookup_detail: str = ""
+    # Mira's own review threads that are still open from earlier rounds, rebuilt
+    # as findings. A re-review doesn't re-draft what it already posted (the
+    # prompt asks it not to repeat itself and drop_already_posted removes
+    # overlaps), so without these the verdict would soften while a blocker is
+    # still open on the PR.
+    outstanding_comments: list[ReviewComment] = field(default_factory=list)
     # Diagnostic trail: per-chunk draft counts and every comment dropped by a
     # filter/critique stage, so a benchmark run can show whether a missed
     # finding was never drafted or drafted-then-dropped. Not posted anywhere.
