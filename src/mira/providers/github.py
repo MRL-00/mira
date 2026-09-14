@@ -412,11 +412,8 @@ class GitHubProvider(BaseProvider):
         pr_info: PRInfo,
         result: ReviewResult,
         bot_name: str = "miracodeai",
-        request_changes: bool = False,
     ) -> list[int]:
-        # A "Request changes" verdict with no inline findings still needs to
-        # post, so the review can carry the blocking state.
-        if not result.comments and not request_changes:
+        if not result.comments:
             return []
 
         # The line GitHub anchors a comment to (the end line for multi-line).
@@ -444,9 +441,6 @@ class GitHubProvider(BaseProvider):
         if result.key_issues:
             review_body += _format_key_issues(result.key_issues)
 
-        # Blocks merge on GitHub when Mira's verdict is "Request changes".
-        review_event = "REQUEST_CHANGES" if request_changes else "COMMENT"
-
         @_retry_transient
         def _post() -> list[int]:
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
@@ -464,7 +458,7 @@ class GitHubProvider(BaseProvider):
                 review = pr.create_review(
                     commit=latest_commit,
                     body=review_body,
-                    event=review_event,
+                    event="COMMENT",
                     comments=review_comments,  # type: ignore[arg-type]
                 )
                 # Map the posted comments back to ours by (path, anchored line)
@@ -527,22 +521,19 @@ class GitHubProvider(BaseProvider):
 
             # If every inline failed, post the summary alone so the review still shows up.
             if posted == 0 and review_body:
-                for event in (review_event, "COMMENT"):
-                    try:
-                        pr.create_review(
-                            commit=latest_commit,
-                            body=review_body,
-                            event=event,
-                            comments=[],
-                        )
-                        break
-                    except GithubException as exc:
-                        logger.warning(
-                            "Summary-only fallback with event=%s failed (%s): %s",
-                            event,
-                            exc.status,
-                            exc.data,
-                        )
+                try:
+                    pr.create_review(
+                        commit=latest_commit,
+                        body=review_body,
+                        event="COMMENT",
+                        comments=[],
+                    )
+                except GithubException as exc:
+                    logger.warning(
+                        "Summary-only fallback also failed (%s): %s",
+                        exc.status,
+                        exc.data,
+                    )
 
             logger.info("Individual fallback: posted %d/%d comments", posted, len(review_comments))
             return ids

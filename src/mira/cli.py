@@ -42,7 +42,6 @@ def _format_text(result: ReviewResult) -> str:
                 comments=result.comments,
                 additions=result.additions,
                 deletions=result.deletions,
-                ticket_criteria=result.ticket_criteria or None,
             )
         )
         lines.append("")

@@ -26,11 +26,9 @@ from mira.models import (
     FileChangeType,
     FileDiff,
     KeyIssue,
-    LinkedIssue,
     PRInfo,
     ReviewComment,
     Severity,
-    TicketCriterion,
     UnresolvedThread,
     WalkthroughConfidenceScore,
     WalkthroughResult,
@@ -466,47 +464,6 @@ class TestReviewEngine:
         # File descriptions from the walkthrough response are rendered too.
         assert "### What changed" in final
         assert "src/utils.py" in final
-
-    @pytest.mark.asyncio
-    async def test_unmet_ticket_criterion_requests_changes(
-        self, mock_llm: LLMProvider, mock_provider: AsyncMock, monkeypatch: pytest.MonkeyPatch
-    ):
-        """A missed linked-ticket requirement shows up and blocks the PR."""
-        monkeypatch.setattr(
-            "mira.core.engine.resolve_linked_issues",
-            AsyncMock(
-                return_value=[
-                    LinkedIssue(
-                        identifier="ENG-1",
-                        title="Cap retries",
-                        criteria=["Retries are capped"],
-                    )
-                ]
-            ),
-        )
-        monkeypatch.setattr(
-            "mira.core.engine.verify_ticket_criteria",
-            AsyncMock(
-                return_value=[
-                    TicketCriterion(
-                        "ENG-1", "Retries are capped", "unmet", "still an unbounded loop"
-                    )
-                ]
-            ),
-        )
-
-        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
-        await engine.review_pr("https://github.com/test/repo/pull/1")
-
-        mock_provider.post_review.assert_called_once()
-        assert mock_provider.post_review.call_args.kwargs["request_changes"] is True
-
-        bodies = [call.args[1] for call in mock_provider.post_comment.call_args_list]
-        bodies += [call.args[2] for call in mock_provider.update_comment.call_args_list]
-        final = "\n".join(bodies)
-        assert "### Ticket acceptance criteria" in final
-        assert "\u274c Retries are capped" in final
-        assert "Ticket requirements not met:" in final
 
     def _comment(self, severity: Severity) -> ReviewComment:
         return ReviewComment(

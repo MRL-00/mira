@@ -155,12 +155,6 @@ _CHANGE_TYPE_NAME: dict[FileChangeType, str] = {
     FileChangeType.RENAMED: "Renamed",
 }
 
-_CRITERION_GLYPH: dict[str, str] = {
-    "met": "\u2705",
-    "unmet": "\u274c",
-    "unclear": "\u26a0\ufe0f",
-}
-
 # Cap per verdict section so a noisy PR can't turn the walkthrough into a wall
 # of text; the inline comments remain the complete list.
 _VERDICT_LIST_LIMIT = 10
@@ -220,32 +214,28 @@ class Verdict:
     blockers: list[ReviewComment] = field(default_factory=list)
     warnings: list[ReviewComment] = field(default_factory=list)
     optional: list[ReviewComment] = field(default_factory=list)
-    unmet_criteria: list[TicketCriterion] = field(default_factory=list)
 
     @property
     def has_findings(self) -> bool:
-        return bool(self.blockers or self.warnings or self.unmet_criteria)
+        return bool(self.blockers or self.warnings)
 
 
 def derive_verdict(
     comments: list[ReviewComment] | None,
     confidence_score: WalkthroughConfidenceScore | None = None,
-    criteria: list[TicketCriterion] | None = None,
 ) -> Verdict:
     """Derive a merge verdict from the findings that survived filtering.
 
-    Blockers — including any unmet linked-ticket requirement — force "Request
-    changes"; warnings (or a low confidence score) give "Needs review";
-    anything else is safe to merge. Each bucket keeps the comments themselves
-    so callers can list exactly what has to change.
+    Blockers force "Request changes"; warnings (or a low confidence score)
+    give "Needs review"; anything else is safe to merge. Each bucket keeps the
+    comments themselves so callers can list exactly what has to change.
     """
     filed = comments or []
     blockers = [c for c in filed if c.severity == Severity.BLOCKER]
     warnings = [c for c in filed if c.severity == Severity.WARNING]
     optional = [c for c in filed if c.severity <= Severity.SUGGESTION]
-    unmet = [c for c in (criteria or []) if c.is_unmet]
 
-    if blockers or unmet:
+    if blockers:
         label, emoji = "Request changes", "\U0001f6d1"
     elif warnings or (confidence_score is not None and confidence_score.score <= 2):
         label, emoji = "Needs review", "\u26a0\ufe0f"
@@ -258,7 +248,6 @@ def derive_verdict(
         blockers=blockers,
         warnings=warnings,
         optional=optional,
-        unmet_criteria=unmet,
     )
 
 
@@ -272,30 +261,6 @@ class LinkedIssue:
     state: str = ""
     description: str = ""
     source: str = "linear"
-    # Explicit acceptance criteria parsed from the ticket (markdown checkboxes
-    # or an "Acceptance Criteria" section), if any.
-    criteria: list[str] = field(default_factory=list)
-    labels: list[str] = field(default_factory=list)
-    priority: str = ""
-    assignee: str = ""
-    # Recent comment bodies and child-issue summaries, for review context.
-    comments: list[str] = field(default_factory=list)
-    children: list[str] = field(default_factory=list)
-
-
-@dataclass
-class TicketCriterion:
-    """One requirement from a linked ticket, graded against the PR diff."""
-
-    issue: str
-    criterion: str
-    # "met" | "unmet" | "unclear" — unmet forces a "Request changes" verdict.
-    status: str = "unclear"
-    evidence: str = ""
-
-    @property
-    def is_unmet(self) -> bool:
-        return self.status == "unmet"
 
 
 @dataclass
@@ -348,7 +313,6 @@ class WalkthroughResult:
         require_issue: bool = False,
         additions: int = 0,
         deletions: int = 0,
-        ticket_criteria: list[TicketCriterion] | None = None,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -370,7 +334,7 @@ class WalkthroughResult:
         # Suppressed during the in-progress render (findings aren't known yet)
         # and on failure (a "looks good" next to a failure notice is wrong).
         if not in_progress and not failure_notice:
-            verdict_lines = self._render_verdict(comments, key_issues, ticket_criteria)
+            verdict_lines = self._render_verdict(comments, key_issues)
             if verdict_lines:
                 parts.append("")
                 parts.extend(verdict_lines)
@@ -391,11 +355,6 @@ class WalkthroughResult:
         if issue_lines:
             parts.append("")
             parts.extend(issue_lines)
-
-        criteria_lines = self._render_ticket_criteria(ticket_criteria)
-        if criteria_lines:
-            parts.append("")
-            parts.extend(criteria_lines)
 
         changes_lines = self._render_changes()
         if changes_lines:
@@ -526,7 +485,6 @@ class WalkthroughResult:
         self,
         comments: list[ReviewComment] | None,
         key_issues: list[KeyIssue] | None,
-        ticket_criteria: list[TicketCriterion] | None = None,
     ) -> list[str]:
         """Render the verdict headline plus exactly what must change.
 
@@ -535,13 +493,11 @@ class WalkthroughResult:
         the blocker/warning list that justifies it.
         """
         cs = self.confidence_score
-        verdict = derive_verdict(comments, cs, ticket_criteria)
+        verdict = derive_verdict(comments, cs)
 
-        # Nothing to say: no score, no findings, no key issues, no criteria.
-        has_findings = bool(
-            verdict.blockers or verdict.warnings or verdict.optional or verdict.unmet_criteria
-        )
-        if cs is None and not has_findings and not key_issues and not ticket_criteria:
+        # Nothing to say: no score, no findings, no key issues.
+        has_findings = bool(verdict.blockers or verdict.warnings or verdict.optional)
+        if cs is None and not has_findings and not key_issues:
             return []
 
         lines = [f"## Verdict: {verdict.emoji} {verdict.label}", ""]
@@ -559,15 +515,6 @@ class WalkthroughResult:
             lines.append("**Blockers — must fix before merge:**")
             lines.append("")
             lines.extend(_format_finding_lines(verdict.blockers))
-            lines.append("")
-        if verdict.unmet_criteria:
-            lines.append("**Ticket requirements not met:**")
-            lines.append("")
-            for c in verdict.unmet_criteria:
-                line = f"- `{c.issue}` — {c.criterion}"
-                if c.evidence:
-                    line += f" — {c.evidence}"
-                lines.append(line)
             lines.append("")
         if verdict.warnings:
             lines.append("**Warnings — should fix before merge:**")
@@ -627,37 +574,6 @@ class WalkthroughResult:
             lines.append(line)
         return lines
 
-    def _render_ticket_criteria(
-        self,
-        ticket_criteria: list[TicketCriterion] | None,
-    ) -> list[str]:
-        """Render every linked-ticket requirement with its verification status.
-
-        Unmet requirements are never hidden: a ticket reference always produces
-        a full checklist, and a criterion the verification pass could not grade
-        shows as "unclear" rather than silently passing.
-        """
-        if not ticket_criteria:
-            return []
-        by_issue: dict[str, list[TicketCriterion]] = {}
-        for c in ticket_criteria:
-            by_issue.setdefault(c.issue, []).append(c)
-
-        lines = ["### Ticket acceptance criteria", ""]
-        for issue, criteria in by_issue.items():
-            lines.append(f"**{issue}**")
-            lines.append("")
-            for c in criteria:
-                glyph = _CRITERION_GLYPH.get(c.status, "\u2022")
-                line = f"- {glyph} {c.criterion}"
-                if c.evidence:
-                    line += f" — {c.evidence}"
-                lines.append(line)
-            lines.append("")
-        while lines and lines[-1] == "":
-            lines.pop()
-        return lines
-
     def _render_changes(self) -> list[str]:
         """Render per-file change descriptions grouped into logical cohorts."""
         if not self.file_changes:
@@ -709,9 +625,6 @@ class ReviewResult:
     # Line counts across the files actually reviewed, for the walkthrough header.
     additions: int = 0
     deletions: int = 0
-    # Linked-ticket requirements graded against the diff. Any unmet criterion
-    # forces a "Request changes" verdict.
-    ticket_criteria: list[TicketCriterion] = field(default_factory=list)
     # Surfaced in the walkthrough banner so @miracodeai review-rest can target the rest.
     reviewed_paths: list[str] = field(default_factory=list)
     skipped_paths: list[str] = field(default_factory=list)

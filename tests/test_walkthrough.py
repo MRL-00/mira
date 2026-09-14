@@ -599,43 +599,6 @@ class TestWalkthroughToMarkdown:
         assert "### Linked issues" in md
         assert "No linked issue found" in md
 
-    def test_ticket_criteria_checklist_rendered(self):
-        from mira.models import TicketCriterion
-
-        result = WalkthroughResult(summary="Changes.")
-        md = result.to_markdown(
-            ticket_criteria=[
-                TicketCriterion("ENG-482", "Retries are capped", "met"),
-                TicketCriterion("ENG-482", "Failures surface", "unmet", "not handled"),
-                TicketCriterion("ENG-482", "Metrics emitted", "unclear"),
-            ]
-        )
-        assert "### Ticket acceptance criteria" in md
-        assert "**ENG-482**" in md
-        assert "\u2705 Retries are capped" in md
-        assert "\u274c Failures surface — not handled" in md
-        assert "\u26a0\ufe0f Metrics emitted" in md
-
-    def test_unmet_criterion_forces_request_changes(self):
-        from mira.models import TicketCriterion
-
-        result = WalkthroughResult(summary="Changes.")
-        md = result.to_markdown(
-            ticket_criteria=[TicketCriterion("ENG-482", "Failures surface", "unmet")]
-        )
-        assert "## Verdict: \U0001f6d1 Request changes" in md
-        assert "**Ticket requirements not met:**" in md
-        assert "`ENG-482` — Failures surface" in md
-
-    def test_met_criteria_do_not_change_verdict(self):
-        from mira.models import TicketCriterion
-
-        result = WalkthroughResult(summary="Changes.")
-        md = result.to_markdown(
-            ticket_criteria=[TicketCriterion("ENG-482", "Retries are capped", "met")]
-        )
-        assert "## Verdict: \u2705 Looks good to merge" in md
-
     def test_no_confidence_score_no_section(self):
         result = WalkthroughResult(summary="No score.")
         md = result.to_markdown()

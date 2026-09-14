@@ -266,14 +266,8 @@ class GitLabProvider(BaseProvider):
     # ── posting ─────────────────────────────────────────────────────
 
     async def post_review(
-        self,
-        pr_info: PRInfo,
-        result: ReviewResult,
-        bot_name: str = "miracodeai",
-        request_changes: bool = False,
+        self, pr_info: PRInfo, result: ReviewResult, bot_name: str = "miracodeai"
     ) -> None:
-        # GitLab has no merge-blocking "request changes" review state; the
-        # verdict is carried by the walkthrough comment instead.
         if not result.comments:
             return
         try:

@@ -75,10 +75,6 @@ review:
   # Character budget for the diff excerpts fed to the walkthrough so change
   # descriptions are grounded in the actual code (0 = metadata only)
   walkthrough_diff_budget: 40000
-  # Submit the review as "Request changes" (blocking merge) when the verdict is
-  # Request changes — a blocker, or an unmet acceptance criterion on a linked
-  # ticket. Set false to always post a plain comment.
-  request_changes_on_blocker: true
 
 linear:
   # Link Linear issues referenced in the PR title/description/branch and give
