@@ -19,6 +19,8 @@ from mira.models import (
     HunkInfo,
     ReviewComment,
     Severity,
+    WalkthroughConfidenceScore,
+    WalkthroughEffort,
     WalkthroughFileEntry,
     WalkthroughResult,
     build_review_stats,
@@ -117,6 +119,31 @@ class TestBuildWalkthroughPrompt:
         )
         system = messages[0]["content"]
         assert "@@ -0,0 +1,5 @@" in system
+
+    def test_diff_excerpts_in_user_message(self):
+        messages = build_walkthrough_prompt(
+            files=self._make_files(),
+            config=MiraConfig(),
+        )
+        user = messages[1]["content"]
+        # Actual changed code, not just filenames, so descriptions can be specific.
+        assert "+import os" in user
+        assert "+        debug=False" in user
+
+    def test_diff_budget_truncates_excerpts(self):
+        config = MiraConfig()
+        config.review.walkthrough_diff_budget = 40
+        messages = build_walkthrough_prompt(files=self._make_files(), config=config)
+        user = messages[1]["content"]
+        assert "diff truncated" in user
+
+    def test_zero_budget_omits_excerpts(self):
+        config = MiraConfig()
+        config.review.walkthrough_diff_budget = 0
+        messages = build_walkthrough_prompt(files=self._make_files(), config=config)
+        user = messages[1]["content"]
+        assert "+import os" not in user
+        assert "diff truncated" not in user
 
 
 class TestParseWalkthroughResponse:
@@ -426,10 +453,188 @@ class TestWalkthroughToMarkdown:
             ),
         )
         md = result.to_markdown()
-        assert "Confidence: 4/5" in md
-        assert "Safe with minor fixes" in md
+        # The verdict and its rationale are visible, not hidden in a <details>.
+        assert "## Verdict:" in md
+        assert "4/5 confidence" in md
         assert "Looks good overall." in md
+
+    def _comment(
+        self,
+        severity: Severity,
+        path: str = "x.py",
+        line: int = 1,
+        title: str = "t",
+    ):
+        return ReviewComment(
+            path=path,
+            line=line,
+            end_line=None,
+            severity=severity,
+            category="bug",
+            title=title,
+            body="b",
+            confidence=0.9,
+        )
+
+    def test_verdict_lists_required_changes(self):
+        from mira.models import WalkthroughConfidenceScore
+
+        result = WalkthroughResult(
+            summary="Changes.",
+            confidence_score=WalkthroughConfidenceScore(2, "Request changes", "Unbounded loop."),
+        )
+        comments = [
+            self._comment(Severity.BLOCKER, path="a.py", line=10, title="Unbounded retry loop"),
+            self._comment(Severity.WARNING, path="b.py", line=3, title="Missing default"),
+        ]
+        md = result.to_markdown(comments=comments)
+        assert "## Verdict: \U0001f6d1 Request changes" in md
+        assert "Blockers — must fix before merge:" in md
+        assert "`a.py:10` — Unbounded retry loop" in md
+        assert "Warnings — should fix before merge:" in md
+        assert "`b.py:3` — Missing default" in md
+
+    def test_verdict_needs_review_for_warnings_only(self):
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(comments=[self._comment(Severity.WARNING)])
+        assert "## Verdict: \u26a0\ufe0f Needs review" in md
+        assert "`x.py:1` — t" in md
+
+    def test_verdict_derived_ignores_optimistic_label(self):
+        from mira.models import WalkthroughConfidenceScore
+
+        result = WalkthroughResult(
+            summary="Changes.",
+            confidence_score=WalkthroughConfidenceScore(5, "Safe to merge", "no risks"),
+        )
+        md = result.to_markdown(comments=[self._comment(Severity.BLOCKER)])
+        # Findings win over the model's free-form label.
+        assert "Request changes" in md
+        assert "Safe to merge" not in md
+
+    def test_verdict_suppressed_in_progress(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            confidence_score=WalkthroughConfidenceScore(5, "Safe", "ok"),
+        )
+        md = result.to_markdown(in_progress=True)
+        assert "## Verdict:" not in md
+
+    def test_verdict_suppressed_on_failure(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            confidence_score=WalkthroughConfidenceScore(5, "Safe", "ok"),
+        )
+        md = result.to_markdown(failure_notice="boom")
+        assert "## Verdict:" not in md
+
+    def test_optional_suggestions_collapsed(self):
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(comments=[self._comment(Severity.SUGGESTION)])
+        assert "Optional suggestions (1)" in md
         assert "<details>" in md
+
+    def test_changes_section_groups_files(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            file_changes=[
+                WalkthroughFileEntry("a.py", FileChangeType.ADDED, "New helper", "Core"),
+                WalkthroughFileEntry("b.py", FileChangeType.MODIFIED, "Wire it up", "Core"),
+                WalkthroughFileEntry("c.py", FileChangeType.MODIFIED, "Test it", "Tests"),
+            ],
+        )
+        md = result.to_markdown()
+        assert "### What changed" in md
+        assert "**Core**" in md
+        assert "**Tests**" in md
+        assert "- **Added** `a.py` — New helper" in md
+        assert "- **Modified** `b.py` — Wire it up" in md
+
+    def test_linked_issues_rendered(self):
+        from mira.models import LinkedIssue
+
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            linked_issues=[
+                LinkedIssue(
+                    identifier="ENG-123",
+                    title="Add retry",
+                    state="In Progress",
+                    url="https://linear.app/acme/issue/ENG-123",
+                )
+            ]
+        )
+        assert "### Linked issues" in md
+        assert "[ENG-123](https://linear.app/acme/issue/ENG-123) — Add retry *(In Progress)*" in md
+
+    def test_no_linked_issues_section_by_default(self):
+        result = WalkthroughResult(summary="Changes.")
+        assert "### Linked issues" not in result.to_markdown()
+
+    def test_effort_rendered(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            effort=WalkthroughEffort(level=4, label="Complex", minutes=45),
+        )
+        md = result.to_markdown()
+        assert "Estimated review effort:" in md
+        assert "Complex (4/5)" in md
+        assert "~45 min" in md
+
+    def test_diffstat_rendered(self):
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(reviewed_files=3, additions=120, deletions=30)
+        assert "`+120 \u221230`" in md
+
+    def test_effort_suppressed_in_progress(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            effort=WalkthroughEffort(level=4, label="Complex", minutes=45),
+        )
+        assert "Estimated review effort:" not in result.to_markdown(in_progress=True)
+
+    def test_require_issue_warns_when_missing(self):
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(require_issue=True)
+        assert "### Linked issues" in md
+        assert "No linked issue found" in md
+
+    def test_ticket_criteria_checklist_rendered(self):
+        from mira.models import TicketCriterion
+
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            ticket_criteria=[
+                TicketCriterion("ENG-482", "Retries are capped", "met"),
+                TicketCriterion("ENG-482", "Failures surface", "unmet", "not handled"),
+                TicketCriterion("ENG-482", "Metrics emitted", "unclear"),
+            ]
+        )
+        assert "### Ticket acceptance criteria" in md
+        assert "**ENG-482**" in md
+        assert "\u2705 Retries are capped" in md
+        assert "\u274c Failures surface — not handled" in md
+        assert "\u26a0\ufe0f Metrics emitted" in md
+
+    def test_unmet_criterion_forces_request_changes(self):
+        from mira.models import TicketCriterion
+
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            ticket_criteria=[TicketCriterion("ENG-482", "Failures surface", "unmet")]
+        )
+        assert "## Verdict: \U0001f6d1 Request changes" in md
+        assert "**Ticket requirements not met:**" in md
+        assert "`ENG-482` — Failures surface" in md
+
+    def test_met_criteria_do_not_change_verdict(self):
+        from mira.models import TicketCriterion
+
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            ticket_criteria=[TicketCriterion("ENG-482", "Retries are capped", "met")]
+        )
+        assert "## Verdict: \u2705 Looks good to merge" in md
 
     def test_no_confidence_score_no_section(self):
         result = WalkthroughResult(summary="No score.")

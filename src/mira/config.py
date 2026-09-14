@@ -187,6 +187,11 @@ class ReviewConfig(BaseModel):
     focus_only_on_problems: bool = False
     walkthrough: bool = True
     walkthrough_sequence_diagram: bool = True
+    # Character budget for the diff excerpts fed to the walkthrough call. The
+    # walkthrough describes what each file changed and how the pieces relate,
+    # which it cannot do from filenames alone. Excerpts are split evenly across
+    # the reviewed files; raise for more accurate descriptions on large PRs.
+    walkthrough_diff_budget: int = Field(default=40_000, ge=0)
     code_context: bool = True
     context_token_budget: int = 8_000
     max_concurrent_chunks: int = Field(default=5, ge=1, le=20)
@@ -271,6 +276,12 @@ class ReviewConfig(BaseModel):
     # resolves them (user-initiated reject/resolve replies still work).
     auto_resolve_conversations: bool = True
 
+    # Submit the platform review as "Request changes" (not a plain comment) when
+    # the derived verdict is "Request changes" — i.e. there is a blocker or a
+    # linked-ticket acceptance criterion the PR does not satisfy. This actively
+    # blocks merge on hosts that honour it. Set false to always comment.
+    request_changes_on_blocker: bool = True
+
     # Auto-review on every push (`synchronize` event). When False, Mira only
     # reviews when the PR is opened or reopened. Subsequent commits are
     # ignored unless you comment `@bot_name review` to trigger a manual pass.
@@ -285,6 +296,27 @@ class IndexConfig(BaseModel):
     # Defaults to the previous hard-coded tarball cap (1 MB) so it's a no-op
     # until lowered; 0 disables the limit. In bytes, matching review.max_file_size.
     max_file_size: int = Field(default=1024 * 1024, ge=0)
+
+
+class LinearConfig(BaseModel):
+    """Linear issue linking for PRs that reference a tracked ticket.
+
+    When enabled and an API key is present in ``api_key_env``, Mira reads the
+    issues referenced in the PR title/description/branch and gives the reviewer
+    their intent so it can check the change against the ticket. Purely
+    best-effort — a missing key disables the feature without erroring.
+    """
+
+    enabled: bool = True
+    # Env var holding the Linear personal API key. Deployment-only.
+    api_key_env: str = "MIRA_LINEAR_TOKEN"
+    # Linear GraphQL endpoint. Deployment-only.
+    api_url: str = "https://api.linear.app/graphql"
+    # Only treat identifiers with these team keys as issues; empty = accept any
+    # denylisted-filtered ``ABC-123`` token.
+    team_keys: list[str] = Field(default_factory=list)
+    # Render a walkthrough note when a PR references no issue at all.
+    require_issue: bool = False
 
 
 class ProviderConfig(BaseModel):
@@ -305,6 +337,7 @@ class MiraConfig(BaseModel):
     index: IndexConfig = Field(default_factory=IndexConfig)
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    linear: LinearConfig = Field(default_factory=LinearConfig)
 
 
 def find_config_file(start_dir: Path | None = None) -> Path | None:
@@ -342,17 +375,30 @@ _DEPLOYMENT_ONLY_LLM_KEYS = frozenset(
     }
 )
 
+# Credential/endpoint settings a repository-controlled `.mira.yaml` must not
+# override: an untrusted repo could otherwise redirect the Linear key to an
+# attacker-controlled host.
+_DEPLOYMENT_ONLY_LINEAR_KEYS = frozenset({"api_key_env", "api_url"})
 
-def _strip_deployment_only_llm_settings(overlay: dict[str, Any]) -> dict[str, Any]:
-    """Remove process-execution settings from an untrusted per-repo overlay."""
+
+def _strip_deployment_only_settings(overlay: dict[str, Any]) -> dict[str, Any]:
+    """Remove process-execution and credential settings from an untrusted overlay."""
     cleaned = dict(overlay)
+
     llm = cleaned.get("llm")
-    if not isinstance(llm, dict):
-        return cleaned
-    cleaned_llm = dict(llm)
-    for key in _DEPLOYMENT_ONLY_LLM_KEYS:
-        cleaned_llm.pop(key, None)
-    cleaned["llm"] = cleaned_llm
+    if isinstance(llm, dict):
+        cleaned_llm = dict(llm)
+        for key in _DEPLOYMENT_ONLY_LLM_KEYS:
+            cleaned_llm.pop(key, None)
+        cleaned["llm"] = cleaned_llm
+
+    linear = cleaned.get("linear")
+    if isinstance(linear, dict):
+        cleaned_linear = dict(linear)
+        for key in _DEPLOYMENT_ONLY_LINEAR_KEYS:
+            cleaned_linear.pop(key, None)
+        cleaned["linear"] = cleaned_linear
+
     return cleaned
 
 
@@ -421,14 +467,14 @@ def load_config(
             raise ConfigError(f"Config file not found: {path}")
         overlay = _load_yaml(path)
         if not trust_execution_settings:
-            overlay = _strip_deployment_only_llm_settings(overlay)
+            overlay = _strip_deployment_only_settings(overlay)
         data = _deep_merge(data, overlay)
     else:
         found = find_config_file()
         if found:
             overlay = _load_yaml(found)
             if not trust_execution_settings:
-                overlay = _strip_deployment_only_llm_settings(overlay)
+                overlay = _strip_deployment_only_settings(overlay)
             data = _deep_merge(data, overlay)
 
     if overrides:
