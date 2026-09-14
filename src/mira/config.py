@@ -282,6 +282,13 @@ class ReviewConfig(BaseModel):
     # blocks merge on hosts that honour it. Set false to always comment.
     request_changes_on_blocker: bool = True
 
+    # Publish a GitHub check run for each review so Mira appears in the PR's
+    # checks list and can be made a required branch-protection status check.
+    # Requires the GitHub App's "Checks: read and write" permission; without it
+    # the check run is skipped with a warning and the review is unaffected.
+    check_run: bool = True
+    check_name: str = "Mira Review"
+
     # Auto-review on every push (`synchronize` event). When False, Mira only
     # reviews when the PR is opened or reopened. Subsequent commits are
     # ignored unless you comment `@bot_name review` to trigger a manual pass.

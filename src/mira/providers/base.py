@@ -78,6 +78,19 @@ class BaseProvider(abc.ABC):
         """Look up the review thread for a comment. Returns thread ID or None."""
         return None
 
+    async def post_check_run(
+        self,
+        pr_info: PRInfo,
+        result: ReviewResult,
+        verdict_label: str,
+        name: str = "Mira Review",
+    ) -> None:
+        """Publish a platform check/status for the review.
+
+        Default no-op — only hosts with a checks API (GitHub) implement it.
+        """
+        return
+
     async def add_label(self, pr_info: PRInfo, label: str) -> None:
         """Add a label to a pull request."""
         return

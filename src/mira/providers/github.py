@@ -113,6 +113,55 @@ def _github_checks(commit: Any) -> tuple[str, str, bool]:
     )
 
 
+# Maps Mira's verdict to a GitHub check-run conclusion. "Request changes"
+# (blockers or unmet ticket criteria) fails the check so branch protection can
+# require it; "Needs review" is neutral; a clean review passes.
+_CHECK_CONCLUSION: dict[str, str] = {
+    "Request changes": "failure",
+    "Needs review": "neutral",
+    "Looks good to merge": "success",
+}
+
+_CRITERION_GLYPH: dict[str, str] = {"met": "\u2705", "unmet": "\u274c", "unclear": "\u26a0\ufe0f"}
+
+
+def _check_summary(result: ReviewResult, verdict_label: str) -> str:
+    """One-paragraph check-run summary: verdict, finding counts, and the summary."""
+    lines = [f"**{verdict_label}**"]
+    blockers = sum(1 for c in result.comments if c.severity == Severity.BLOCKER)
+    warnings = sum(1 for c in result.comments if c.severity == Severity.WARNING)
+    unmet = sum(1 for c in result.ticket_criteria if c.is_unmet)
+    stats: list[str] = []
+    if blockers:
+        stats.append(f"{blockers} blocker{'s' if blockers != 1 else ''}")
+    if warnings:
+        stats.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
+    if unmet:
+        stats.append(f"{unmet} unmet ticket requirement{'s' if unmet != 1 else ''}")
+    if stats:
+        lines.append(", ".join(stats).capitalize() + ".")
+    if result.summary:
+        lines.append(result.summary)
+    return "\n\n".join(lines)[:65000]
+
+
+def _check_text(result: ReviewResult) -> str:
+    """Check-run detail: the ticket checklist and the filed findings."""
+    lines: list[str] = []
+    if result.ticket_criteria:
+        lines.append("### Ticket acceptance criteria")
+        for c in result.ticket_criteria:
+            glyph = _CRITERION_GLYPH.get(c.status, "\u2022")
+            lines.append(f"- {glyph} {c.issue}: {c.criterion}")
+    if result.comments:
+        if lines:
+            lines.append("")
+        lines.append("### Findings")
+        for c in result.comments:
+            lines.append(f"- `{c.path}:{c.line}` — {c.title} ({c.severity.name.lower()})")
+    return "\n".join(lines)[:65000]
+
+
 def _linear_review_value(result: ReviewResult) -> tuple[str, bool]:
     if result.linear_lookup_status == "not_linked":
         return "N/A — No linked Linear ticket found", True
@@ -758,6 +807,45 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to post review: {e}") from e
+
+    async def post_check_run(
+        self,
+        pr_info: PRInfo,
+        result: ReviewResult,
+        verdict_label: str,
+        name: str = "Mira Review",
+    ) -> None:
+        """Publish a completed GitHub check run for this review.
+
+        Makes Mira visible in the PR's checks list and usable as a required
+        branch-protection status check. Best-effort: the GitHub App needs the
+        ``checks: write`` permission, and any failure (missing permission,
+        unknown SHA) is logged without affecting the review.
+        """
+        conclusion = _CHECK_CONCLUSION.get(verdict_label, "neutral")
+
+        def _post() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            sha = pr_info.head_sha or gh_repo.get_pull(pr_info.number).head.sha
+            gh_repo.get_commit(sha).create_check_run(
+                name=name,
+                head_sha=sha,
+                status="completed",
+                conclusion=conclusion,
+                details_url=pr_info.url,
+                output={
+                    "title": f"Mira: {verdict_label}",
+                    "summary": _check_summary(result, verdict_label),
+                    "text": _check_text(result),
+                },
+            )
+
+        try:
+            await asyncio.to_thread(_post)
+        except GithubException as exc:
+            logger.warning("Failed to create check run (%s): %s", getattr(exc, "status", "?"), exc)
+        except Exception as exc:  # noqa: BLE001 — a check run must never break a review
+            logger.warning("Failed to create check run: %s", exc)
 
     async def post_comment(self, pr_info: PRInfo, body: str) -> None:
         @_retry_transient
