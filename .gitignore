@@ -64,3 +64,6 @@ ui/mira/.vite/
 
 # Claude Code workspace artifacts
 .claude/
+
+# Amp orb runtime state
+.amp/portals/*

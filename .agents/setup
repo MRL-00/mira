@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+run_step() {
+  local label="$1"
+  shift
+  echo "==> $label"
+  time "$@"
+}
+
+run_step "Install Python 3.12" uv python install 3.12
+run_step "Sync Python dependencies" \
+  uv sync --python 3.12 --frozen --all-extras
+run_step "Sync dashboard dependencies" \
+  npm ci --prefix ui/mira --no-audit --no-fund
+
+echo "Orb setup complete."

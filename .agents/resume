@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mira's default development and test paths use local SQLite and require no
+# service reconnection or authentication on orb resume.
+echo "No orb resume steps required."
