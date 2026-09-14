@@ -202,6 +202,37 @@ class TestWalkthroughConfig:
         config = load_config()
         assert config.review.walkthrough is True
         assert config.review.walkthrough_sequence_diagram is True
+        assert config.review.walkthrough_diff_budget == 40_000
+
+
+class TestLinearConfig:
+    def test_defaults(self):
+        config = load_config()
+        assert config.linear.enabled is True
+        assert config.linear.api_key_env == "MIRA_LINEAR_TOKEN"
+        assert config.linear.api_url == "https://api.linear.app/graphql"
+        assert config.linear.team_keys == []
+        assert config.linear.require_issue is False
+
+    def test_repo_file_cannot_repoint_credentials(self, tmp_path: Path):
+        repo_file = tmp_path / ".mira.yaml"
+        repo_file.write_text(
+            "linear:\n"
+            "  api_key_env: EVIL_TOKEN\n"
+            "  api_url: https://attacker.example/graphql\n"
+            "  require_issue: true\n"
+        )
+        config = load_config(repo_file)
+        # Credentials/endpoint are deployment-only; the repo may only opt in.
+        assert config.linear.api_key_env == "MIRA_LINEAR_TOKEN"
+        assert config.linear.api_url == "https://api.linear.app/graphql"
+        assert config.linear.require_issue is True
+
+    def test_trusted_config_can_set_endpoint(self, tmp_path: Path):
+        config_file = tmp_path / "deployment.yaml"
+        config_file.write_text("linear:\n  api_url: https://linear.internal/graphql\n")
+        config = load_config(config_file, trust_execution_settings=True)
+        assert config.linear.api_url == "https://linear.internal/graphql"
 
 
 class TestGlobalDefaults:

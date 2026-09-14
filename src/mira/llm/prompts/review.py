@@ -37,6 +37,7 @@ def build_review_prompt(
     review_round: int = 1,
     resolved_threads: list[dict] | None = None,
     team_conventions: str = "",
+    linked_issues_context: str = "",
 ) -> list[dict[str, str]]:
     """Build the review prompt messages for the LLM.
 
@@ -95,6 +96,7 @@ def build_review_prompt(
         resolved_threads=resolved_threads,
         team_conventions=team_conventions,
         footguns=footguns,
+        linked_issues_context=linked_issues_context,
     )
 
     # Build user message with optional code context before diffs
@@ -170,16 +172,30 @@ def _extract_hunk_headers(f: FileDiff) -> list[str]:
     return headers
 
 
+def _truncate_excerpt(text: str, limit: int) -> str:
+    """Truncate a diff excerpt on a line boundary, marking the cut."""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    clipped = text[:limit]
+    newline = clipped.rfind("\n")
+    if newline > 0:
+        clipped = clipped[:newline]
+    return clipped.rstrip() + "\n… (diff truncated)"
+
+
 def build_walkthrough_prompt(
     files: list[FileDiff],
     config: MiraConfig,
     pr_title: str = "",
     pr_description: str = "",
+    code_context: str = "",
 ) -> list[dict[str, str]]:
     """Build the walkthrough prompt messages for the LLM.
 
-    Uses only file metadata (not full diffs) to keep the prompt compact.
-    Returns a list of message dicts with 'role' and 'content' keys.
+    The per-file metadata keeps the prompt scannable, while bounded diff
+    excerpts give the model the actual code so its change descriptions and
+    relationship diagram describe what changed rather than what the filename
+    suggests. Returns a list of message dicts with 'role' and 'content' keys.
     """
     env = _get_template_env()
     template = env.get_template("walkthrough.jinja2")
@@ -203,9 +219,24 @@ def build_walkthrough_prompt(
         include_sequence_diagram=config.review.walkthrough_sequence_diagram,
     )
 
+    user_parts: list[str] = []
+    if code_context:
+        user_parts.append(code_context)
+
+    budget = config.review.walkthrough_diff_budget
+    per_file = budget // max(1, len(files))
+    for f in files:
+        if per_file <= 0:
+            break
+        diff_text = "\n".join(h.content.rstrip() for h in f.hunks)
+        excerpt = _truncate_excerpt(diff_text, per_file)
+        if excerpt:
+            user_parts.append(f"### `{f.path}` ({f.change_type.value})\n\n{excerpt}")
+    user_parts.append("Generate the walkthrough for this PR.")
+
     return [
         {"role": "system", "content": system_content},
-        {"role": "user", "content": "Generate the walkthrough for this PR."},
+        {"role": "user", "content": "\n\n".join(user_parts)},
     ]
 
 

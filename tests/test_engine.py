@@ -444,6 +444,27 @@ class TestReviewEngine:
         assert mock_provider.post_comment.call_count >= 1
         mock_provider.post_review.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_walkthrough_includes_verdict_and_required_changes(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock
+    ):
+        """The final walkthrough names the verdict and the blocker behind it."""
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        # find_bot_comment returns None in the fixture, so the final walkthrough
+        # lands via post_comment rather than update_comment.
+        bodies = [call.args[1] for call in mock_provider.post_comment.call_args_list]
+        bodies += [call.args[2] for call in mock_provider.update_comment.call_args_list]
+        final = "\n".join(bodies)
+        assert "## Verdict:" in final
+        assert "Request changes" in final
+        assert "Blockers — must fix before merge:" in final
+        assert "`src/utils.py:16`" in final
+        # File descriptions from the walkthrough response are rendered too.
+        assert "### What changed" in final
+        assert "src/utils.py" in final
+
     def _comment(self, severity: Severity) -> ReviewComment:
         return ReviewComment(
             path="x.py",
@@ -466,8 +487,10 @@ class TestReviewEngine:
         )
         _clamp_confidence_to_findings(wt, [self._comment(Severity.BLOCKER)])
         assert wt.confidence_score.score == 2
-        assert wt.confidence_score.label == "Do not merge"
+        assert wt.confidence_score.label == "Request changes"
         assert "1 blocker" in wt.confidence_score.reason
+        # The reason must name the finding, not just count it.
+        assert "`x.py:1`" in wt.confidence_score.reason
 
     def test_clamp_many_warnings_forces_score_three(self):
         wt = WalkthroughResult(
