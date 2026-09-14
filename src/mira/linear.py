@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import httpx
@@ -184,17 +185,27 @@ class LinearClient:
         self._api_key = api_key
         self._api_url = api_url
 
-    async def fetch_issues(self, identifiers: list[str]) -> list[LinkedIssue]:
-        """Fetch each identifier, skipping ones Linear doesn't know."""
+    async def fetch_issues(self, identifiers: list[str]) -> tuple[list[LinkedIssue], list[str]]:
+        """Fetch each identifier.
+
+        Returns the issues Linear knows plus a description of every identifier
+        that could not be read, so a caller can tell "no such ticket" apart from
+        "the lookup itself failed" instead of reporting a bare empty result.
+        """
         issues: list[LinkedIssue] = []
+        errors: list[str] = []
         async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
             for identifier in identifiers:
-                issue = await self._fetch_one(client, identifier)
+                issue, error = await self._fetch_one(client, identifier)
                 if issue is not None:
                     issues.append(issue)
-        return issues
+                elif error:
+                    errors.append(error)
+        return issues, errors
 
-    async def _fetch_one(self, client: httpx.AsyncClient, identifier: str) -> LinkedIssue | None:
+    async def _fetch_one(
+        self, client: httpx.AsyncClient, identifier: str
+    ) -> tuple[LinkedIssue | None, str]:
         try:
             response = await client.post(
                 self._api_url,
@@ -207,14 +218,25 @@ class LinearClient:
             )
             response.raise_for_status()
             payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else "?"
+            logger.warning("Linear lookup failed for %s: HTTP %s", identifier, status)
+            return None, f"{identifier}: Linear API returned HTTP {status}"
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning("Linear lookup failed for %s: %s", identifier, exc)
-            return None
+            return None, f"{identifier}: Linear API request failed"
+
+        graphql_errors = payload.get("errors") if isinstance(payload, dict) else None
+        if isinstance(graphql_errors, list) and graphql_errors:
+            first = graphql_errors[0]
+            message = str(first.get("message", "")) if isinstance(first, dict) else str(first)
+            logger.warning("Linear lookup rejected for %s: %s", identifier, message)
+            return None, f"{identifier}: {message or 'Linear API error'}"
 
         data = payload.get("data") if isinstance(payload, dict) else None
         issue = data.get("issue") if isinstance(data, dict) else None
         if not isinstance(issue, dict):
-            return None
+            return None, f"{identifier} not found (or not visible to this API key)"
         state = issue.get("state")
         assignee = issue.get("assignee")
         description = str(issue.get("description") or "")
@@ -279,29 +301,80 @@ class LinearClient:
             assignee=str(assignee.get("displayName") or "") if isinstance(assignee, dict) else "",
             comments=comments,
             children=children,
-        )
+        ), ""
 
 
-async def resolve_linked_issues(pr_info: PRInfo, config: MiraConfig) -> list[LinkedIssue]:
+@dataclass
+class LinearLookup:
+    """Outcome of a best-effort Linear lookup for a PR's linked tickets."""
+
+    issues: list[LinkedIssue] = field(default_factory=list)
+    # "loaded" (issues fetched) | "unavailable" (referenced, but unreadable) |
+    # "not_linked" (the PR references no ticket at all).
+    status: str = "not_linked"
+    # Identifiers the PR references, whether or not Linear could return them.
+    identifiers: list[str] = field(default_factory=list)
+    # Operator-actionable reason an unavailable lookup failed.
+    detail: str = ""
+
+
+def api_key_env_names(config: MiraConfig) -> list[str]:
+    """Env vars checked for the Linear API key, primary first."""
+    linear = config.linear
+    names = [str(linear.api_key_env)]
+    names.extend(str(name) for name in linear.api_key_env_fallbacks)
+    return [name for name in names if name]
+
+
+def _api_key(config: MiraConfig) -> str:
+    for name in api_key_env_names(config):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+async def resolve_linked_issues(pr_info: PRInfo, config: MiraConfig) -> LinearLookup:
     """Best-effort fetch of Linear issues referenced by ``pr_info``.
 
-    Every failure mode (disabled, missing key, bad config, network) resolves to
-    an empty list — a tracker lookup must never block or break a review.
+    Failures are reported, not hidden: an empty result carries the reason (no
+    API key, disabled, API error, ticket not found/visible) so the review can
+    say *why* a referenced ticket is unverified. A tracker lookup must never
+    block or break a review, so no failure raises.
     """
     try:
         linear = config.linear
-        if not linear.enabled:
-            return []
-        api_key = os.environ.get(str(linear.api_key_env), "").strip()
-        if not api_key:
-            return []
         identifiers = issue_identifiers_for_pr(pr_info, linear.team_keys)
         if not identifiers:
-            return []
-        return await LinearClient(api_key, str(linear.api_url)).fetch_issues(identifiers)
+            return LinearLookup(status="not_linked")
+        if not linear.enabled:
+            return LinearLookup(
+                status="unavailable",
+                identifiers=identifiers,
+                detail="Linear linking is disabled (linear.enabled=false)",
+            )
+        api_key = _api_key(config)
+        if not api_key:
+            expected = " or ".join(f"`{name}`" for name in api_key_env_names(config))
+            return LinearLookup(
+                status="unavailable",
+                identifiers=identifiers,
+                detail=f"no Linear API key set (expected {expected})",
+            )
+        issues, errors = await LinearClient(api_key, str(linear.api_url)).fetch_issues(identifiers)
+        if issues:
+            return LinearLookup(status="loaded", identifiers=identifiers, issues=issues)
+        return LinearLookup(
+            status="unavailable",
+            identifiers=identifiers,
+            detail="; ".join(errors) or "Linear returned no matching issue",
+        )
     except Exception as exc:  # noqa: BLE001 — never let ticket lookup break a review
         logger.warning("Linear issue resolution failed: %s", exc)
-        return []
+        return LinearLookup(
+            status="unavailable",
+            detail=f"Linear lookup failed: {exc}",
+        )
 
 
 def format_issues_context(issues: list[LinkedIssue]) -> str:

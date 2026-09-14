@@ -20,6 +20,7 @@ from mira.core.engine import (
     _security_relevant_files,
 )
 from mira.core.threads import _extract_sections
+from mira.linear import LinearLookup
 from mira.llm.provider import LLMProvider
 from mira.models import (
     WALKTHROUGH_MARKER,
@@ -208,6 +209,50 @@ class TestReviewEngine:
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
         mock_provider.post_review.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_unreadable_ticket_blocks_approval_and_explains(
+        self, mock_provider: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A clean review whose linked ticket could not be read must not read as
+        an approval, and must say why (the PR-674 case)."""
+        monkeypatch.setattr(
+            "mira.core.engine.resolve_linked_issues",
+            AsyncMock(
+                return_value=LinearLookup(
+                    status="unavailable",
+                    identifiers=["EPIC-1113"],
+                    detail="no Linear API key set (expected `MIRA_LINEAR_TOKEN`)",
+                )
+            ),
+        )
+        llm = MagicMock(spec=LLMProvider)
+        no_comments = json.dumps(
+            {
+                "comments": [],
+                "summary": "All good!",
+                "metadata": {"reviewed_files": 1},
+            }
+        )
+        llm.review = AsyncMock(return_value=no_comments)
+        llm.walkthrough = AsyncMock(return_value=_WALKTHROUGH_LLM_RESPONSE)
+        llm.complete = AsyncMock(return_value=no_comments)
+        llm.count_tokens = MagicMock(return_value=100)
+        llm.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        engine = ReviewEngine(config=MiraConfig(), llm=llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        assert mock_provider.post_review.await_args.kwargs["verdict_label"] == "Needs review"
+        assert mock_provider.post_check_run.await_args.args[2] == "Needs review"
+        # The single walkthrough comment carries the reason.
+        bodies = [call.args[1] for call in mock_provider.post_comment.await_args_list] + [
+            call.args[2] for call in mock_provider.update_comment.await_args_list
+        ]
+        assert any(
+            "Could not read EPIC-1113" in body and "no Linear API key set" in body
+            for body in bodies
+        ), bodies
 
     @pytest.mark.asyncio
     async def test_empty_diff(self, mock_llm: LLMProvider):
@@ -487,8 +532,9 @@ class TestReviewEngine:
         assert "Request changes" in final
         assert "Blockers — must fix before merge:" in final
         assert "`src/utils.py:16`" in final
-        # File descriptions from the walkthrough response are rendered too.
-        assert "### What changed" in final
+        # File descriptions from the walkthrough response are rendered too
+        # (collapsed behind "What changed").
+        assert "What changed" in final
         assert "src/utils.py" in final
 
     @pytest.mark.asyncio
@@ -499,13 +545,17 @@ class TestReviewEngine:
         monkeypatch.setattr(
             "mira.core.engine.resolve_linked_issues",
             AsyncMock(
-                return_value=[
-                    LinkedIssue(
-                        identifier="ENG-1",
-                        title="Cap retries",
-                        criteria=["Retries are capped"],
-                    )
-                ]
+                return_value=LinearLookup(
+                    status="loaded",
+                    identifiers=["ENG-1"],
+                    issues=[
+                        LinkedIssue(
+                            identifier="ENG-1",
+                            title="Cap retries",
+                            criteria=["Retries are capped"],
+                        )
+                    ],
+                )
             ),
         )
         monkeypatch.setattr(

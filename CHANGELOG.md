@@ -18,6 +18,14 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Walkthrough confidence reasons are specific.** When a blocker or warning tightens the confidence score, the reason now names the findings instead of reporting only a count, and a score with no reason falls back to a concrete summary.
+- **One verdict per review, and it is honest about the ticket.** The verdict is derived once (findings + ticket criteria) and drives the walkthrough headline, the review-body row, the posted review event, and the check-run conclusion, so they can no longer disagree. CI status no longer decides the verdict. A PR whose linked ticket Mira *could not read* is never approved: it reports `Needs review` and says why (missing API key, API error, ticket not found/visible), instead of a bare "no findings".
+- **One comment per PR.** The walkthrough comment is now the only review comment: the review body is empty on purpose, because a second body just repeated the walkthrough and made every PR look like it had two competing reviews. CI, docs, and ticket verification moved into a compact `### Review status` block in the walkthrough, so nothing was lost. Mira only posts a review body when it has no inline comments and the verdict blocks the merge — that body names the unmet criteria or blockers, because the review is what does the blocking. On a clean PR you get one comment, one check run, and inline comments only when there is something on the code to point at.
+- **The review body no longer repeats the walkthrough.** The deterministic change map (the Mermaid diagram of how the changed files group together) moved into the walkthrough, so every review keeps a diagram even when the model produces no sequence diagram.
+
+### Fixed
+
+- **Linear lookups no longer fail silently.** Every failure mode (linking disabled, no API key, HTTP/GraphQL error, ticket not found or not visible to the key) now reports a specific reason in the review table, the walkthrough verdict note, and the server log. The shipped `docker-compose.yml` and README documented `MIRA_LINEAR_API_KEY` while the app read `MIRA_LINEAR_TOKEN`; both names now work (`linear.api_key_env` is checked first, then `api_key_env_fallbacks`), and the compose file passes each through.
+- **Readable "could not run tests" message.** When GitHub check runs can't be read, the Tests row says so and, on a 403/404, points at the App's missing **Checks: read** permission instead of a generic message.
 
 ## [0.8.0] — 2026-07-27
 

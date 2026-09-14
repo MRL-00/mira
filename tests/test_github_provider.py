@@ -17,10 +17,7 @@ from mira.models import (
     ReviewComment,
     ReviewResult,
     Severity,
-    WalkthroughConfidenceScore,
-    WalkthroughEffort,
-    WalkthroughFileEntry,
-    WalkthroughResult,
+    TicketCriterion,
 )
 from mira.providers.github import (
     _CATEGORY_DISPLAY,
@@ -70,6 +67,19 @@ class TestGitHubProvider:
     def test_requires_token(self):
         with pytest.raises(ProviderError, match="token is required"):
             GitHubProvider(token="")
+
+
+def _blocker_comment(path: str = "a.py", line: int = 1) -> ReviewComment:
+    return ReviewComment(
+        path=path,
+        line=line,
+        end_line=None,
+        severity=Severity.BLOCKER,
+        category="bug",
+        title="Issue",
+        body="desc",
+        confidence=0.9,
+    )
 
 
 def _make_pr_info() -> PRInfo:
@@ -350,7 +360,17 @@ class TestPostReviewRequestChanges:
             return review
 
         provider, mock_pr = self._provider(create_review=_create_review)
-        result = ReviewResult(comments=[], summary="Ticket criterion unmet")
+        result = ReviewResult(
+            summary="Ticket criterion unmet",
+            ticket_criteria=[
+                TicketCriterion(
+                    issue="EPIC-1113",
+                    criterion="Readers honour autoPaidEnabled",
+                    status="unmet",
+                    evidence="no reader check in the handler",
+                )
+            ],
+        )
         await provider.post_review(_make_pr_info(), result, request_changes=True)
         assert len(calls) == 1
         assert calls[0]["event"] == "REQUEST_CHANGES"
@@ -516,7 +536,7 @@ class TestPostReviewGracefulDegradation:
                     path="a.py",
                     line=1,
                     end_line=None,
-                    severity=Severity.WARNING,
+                    severity=Severity.BLOCKER,
                     category="bug",
                     title="Issue",
                     body="desc",
@@ -558,10 +578,12 @@ class TestPostReviewGracefulDegradation:
         # only /reviews call.
         assert len(review_calls) == 2  # batch + summary-only
         assert mock_pr.create_review_comment.call_count == 1
-        # Summary-only call is the last /reviews call and has comments=[].
+        # Summary-only call is the last /reviews call and lists the findings that
+        # could not be posted inline.
         final = review_calls[-1]
         assert final.get("comments") == []
-        assert "| **Final verdict:** | REQUEST_CHANGES |" in final.get("body", "")
+        assert "1 finding" in final.get("body", "")
+        assert "`a.py:1` — Issue" in final.get("body", "")
 
     @pytest.mark.asyncio
     async def test_partial_individual_success(self):
@@ -629,77 +651,32 @@ class TestPostReviewGracefulDegradation:
 
 
 class TestReviewVerdict:
-    def test_clean_review_with_green_checks_is_approved(self):
-        run = MagicMock(conclusion="success")
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [run]
-        result = ReviewResult(
-            summary="No issues found.",
-            reviewed_files=2,
-            total_paths=["src/app.py", "docs/review.md"],
-            linear_issue_ids=["EPIC-948"],
-            linear_issue_urls=["https://linear.app/example/issue/EPIC-948"],
-            linear_lookup_status="loaded",
-            walkthrough=WalkthroughResult(
-                summary="Adds structured review output.",
-                file_changes=[
-                    WalkthroughFileEntry(
-                        path="src/app.py",
-                        change_type=FileChangeType.MODIFIED,
-                        description="Publishes richer review details.",
-                        group="Review publishing",
-                    ),
-                    WalkthroughFileEntry(
-                        path="docs/review.md",
-                        change_type=FileChangeType.ADDED,
-                        description="Documents the review format.",
-                        group="Documentation",
-                    ),
-                ],
-                effort=WalkthroughEffort(level=1, label="Small", minutes=10),
-                confidence_score=WalkthroughConfidenceScore(
-                    score=5,
-                    label="Safe to merge",
-                    reason="Focused change with passing checks.",
-                ),
-            ),
-        )
+    """The review body stays empty; the walkthrough is the single summary."""
 
-        body, event = _review_body_and_event(result, commit)
-
-        assert event == "APPROVE"
-        assert "| **About:** | Adds structured review output. |" in body
-        assert "| **Tests Pass:** | Yes — 1 passed, 0 failed, 0 skipped, 0 pending |" in body
-        assert "| **Includes Documentation:** | Yes — `docs/review.md` |" in body
-        assert "| **Reviewed against Linear ticket and approved:** | Yes — [EPIC-948]" in body
-        assert "| **Final verdict:** | APPROVE |" in body
-        assert "### Review coverage" in body
-        assert "**Files:** 2 reviewed of 2 changed files" in body
-        assert "**Confidence:** 5/5 — Safe to merge" in body
-        assert "### Change map" in body
-        assert 'pr["Pull request"]' in body
-        assert 'f0["src/app.py"]' in body
-        assert "<summary><b>Changed files</b></summary>" in body
-        assert "| Modified | `src/app.py` | Publishes richer review details. |" in body
-        assert "No actionable findings survived Mira's evidence and self-critique checks." in body
-
-    def test_clean_review_without_green_checks_is_comment(self):
-        run = MagicMock(conclusion="skipped")
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [run]
+    def test_clean_review_is_approved_with_an_empty_body(self):
         result = ReviewResult(summary="No issues found.")
 
-        body, event = _review_body_and_event(result, commit)
+        body, event = _review_body_and_event(result, MagicMock())
 
+        assert event == "APPROVE"
+        assert body == ""
+
+    def test_unverified_ticket_needs_review(self):
+        """A referenced ticket Mira could not read can never be an approval."""
+        result = ReviewResult(
+            summary="No issues found.",
+            linear_issue_ids=["EPIC-1113"],
+            linear_lookup_status="unavailable",
+            linear_lookup_detail="no Linear API key set (expected `MIRA_LINEAR_TOKEN`)",
+        )
+
+        body, event = _review_body_and_event(result, MagicMock())
+
+        # Not an approval, nothing to say inline, so no body and no review.
         assert event == "COMMENT"
-        assert "| **Tests Pass:** | No — 0 passed, 0 failed, 1 skipped, 0 pending |" in body
-        assert "N/A — No linked Linear ticket found" in body
-        assert "| **Final verdict:** | COMMENT |" in body
+        assert body == ""
 
-    def test_warning_requests_changes(self):
-        run = MagicMock(conclusion="success")
-        commit = MagicMock()
-        commit.get_check_runs.return_value = [run]
+    def test_warning_needs_review(self):
         result = ReviewResult(
             comments=[
                 ReviewComment(
@@ -713,23 +690,49 @@ class TestReviewVerdict:
                     confidence=0.9,
                 )
             ],
-            linear_issue_ids=["EPIC-948"],
-            linear_issue_urls=["https://linear.app/example/issue/EPIC-948"],
-            linear_lookup_status="loaded",
         )
 
-        body, event = _review_body_and_event(result, commit)
+        body, event = _review_body_and_event(result, MagicMock())
+
+        # Warnings are advisory: the walkthrough derives "Needs review" rather
+        # than blocking the merge, so the review posts as a plain comment.
+        assert event == "COMMENT"
+        assert body == ""
+
+    def test_unmet_criterion_names_itself_in_the_blocking_body(self):
+        """A blocker with no inline comments must still say what has to change."""
+        result = ReviewResult(
+            ticket_criteria=[
+                TicketCriterion(
+                    issue="EPIC-1113",
+                    criterion="Readers honour autoPaidEnabled",
+                    status="unmet",
+                    evidence="no reader check in the handler",
+                )
+            ],
+        )
+
+        body, event = _review_body_and_event(result, MagicMock(), request_changes=True)
 
         assert event == "REQUEST_CHANGES"
-        assert "blocking review findings remain" in body
-        assert "| **Final verdict:** | REQUEST_CHANGES |" in body
+        assert "Request changes" in body
+        assert "EPIC-1113" in body
+        assert "Readers honour autoPaidEnabled" in body
+
+    def test_config_keeps_a_blocker_advisory(self):
+        result = ReviewResult(comments=[_blocker_comment()])
+
+        body, event = _review_body_and_event(result, MagicMock(), request_changes=False)
+
+        assert event == "COMMENT"
+        assert body == ""
 
     @pytest.mark.asyncio
-    async def test_posts_review_without_inline_comments(self):
+    async def test_clean_review_posts_no_review_at_all(self):
+        """Nothing to say beyond the walkthrough → no second comment."""
         provider = GitHubProvider.__new__(GitHubProvider)
         provider._token = "test-token"
         commit = MagicMock()
-        commit.get_check_runs.return_value = []
         pr = MagicMock()
         pr.get_commits.return_value = [commit]
         repo = MagicMock()
@@ -737,13 +740,104 @@ class TestReviewVerdict:
         provider._github = MagicMock()
         provider._github.get_repo.return_value = repo
 
-        await provider.post_review(_make_pr_info(), ReviewResult(summary="No issues found."))
+        posted = await provider.post_review(
+            _make_pr_info(), ReviewResult(summary="No issues found."), request_changes=False
+        )
 
-        pr.create_review.assert_called_once()
+        assert posted == []
+        pr.create_review.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_blocking_verdict_without_inlines_still_posts(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        commit = MagicMock()
+        pr = MagicMock()
+        pr.get_commits.return_value = [commit]
+        repo = MagicMock()
+        repo.get_pull.return_value = pr
+        provider._github = MagicMock()
+        provider._github.get_repo.return_value = repo
+        result = ReviewResult(
+            ticket_criteria=[
+                TicketCriterion(issue="EPIC-1113", criterion="Do X", status="unmet", evidence="no")
+            ],
+        )
+
+        await provider.post_review(_make_pr_info(), result, request_changes=True)
+
         kwargs = pr.create_review.call_args.kwargs
-        assert kwargs["event"] == "COMMENT"
+        assert kwargs["event"] == "REQUEST_CHANGES"
         assert kwargs["comments"] == []
-        assert "| **Final verdict:** | COMMENT |" in kwargs["body"]
+        assert "EPIC-1113" in kwargs["body"]
+
+
+class TestReviewStatusRows:
+    """CI/docs/ticket status lives in the walkthrough, not a second comment."""
+
+    @pytest.mark.asyncio
+    async def test_walkthrough_rows_include_ci_docs_and_ticket(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        commit = MagicMock()
+        commit.get_check_runs.return_value = [
+            MagicMock(conclusion="success"),
+            MagicMock(conclusion="success"),
+            MagicMock(conclusion="skipped"),
+        ]
+        pr = MagicMock()
+        pr.get_commits.return_value = [commit]
+        repo = MagicMock()
+        repo.get_pull.return_value = pr
+        provider._github = MagicMock()
+        provider._github.get_repo.return_value = repo
+        result = ReviewResult(
+            total_paths=["src/app.py", "docs/review.md"],
+            linear_issue_ids=["EPIC-948"],
+            linear_issue_urls=["https://linear.app/example/issue/EPIC-948"],
+            linear_lookup_status="loaded",
+            ticket_criteria=[
+                TicketCriterion(issue="EPIC-948", criterion="A", status="met", evidence="x")
+            ],
+        )
+
+        rows = await provider.review_status_rows(_make_pr_info(), result)
+
+        labels = [label for label, _ in rows]
+        values = dict(rows)
+        assert labels == ["Tests", "Documentation", "Linked ticket"]
+        assert values["Tests"] == "GitHub checks: 2 passed, 0 failed, 1 skipped, 0 pending"
+        assert values["Documentation"] == "Yes — `docs/review.md`"
+        assert "EPIC-948" in values["Linked ticket"]
+        assert "all 1 acceptance criteria met" in values["Linked ticket"]
+
+    @pytest.mark.asyncio
+    async def test_unreadable_checks_name_the_missing_permission(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        commit = MagicMock()
+        commit.get_check_runs.side_effect = GithubException(status=403, data={"message": "no"})
+        pr = MagicMock()
+        pr.get_commits.return_value = [commit]
+        repo = MagicMock()
+        repo.get_pull.return_value = pr
+        provider._github = MagicMock()
+        provider._github.get_repo.return_value = repo
+
+        rows = await provider.review_status_rows(_make_pr_info(), ReviewResult())
+
+        assert "Checks: read" in dict(rows)["Tests"]
+
+    @pytest.mark.asyncio
+    async def test_checks_failure_never_breaks_the_rows(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._token = "test-token"
+        provider._github = MagicMock()
+        provider._github.get_repo.side_effect = RuntimeError("boom")
+
+        rows = await provider.review_status_rows(_make_pr_info(), ReviewResult())
+
+        assert [label for label, _ in rows] == ["Documentation", "Linked ticket"]
 
 
 class TestFormatCommentBody:

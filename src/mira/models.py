@@ -165,6 +165,19 @@ _CRITERION_GLYPH: dict[str, str] = {
 # of text; the inline comments remain the complete list.
 _VERDICT_LIST_LIMIT = 10
 
+# Cap the collapsed "What changed" list so a very large PR stays skimmable.
+_CHANGES_DISPLAY_LIMIT = 15
+
+# Cap the deterministic change-map diagram so it stays readable on large PRs.
+_CHANGE_MAP_LIMIT = 12
+
+# Canonical verdict labels. The walkthrough headline, the review-body verdict
+# row, the posted review event, and the GitHub check-run conclusion all key off
+# these, so one review can never show two different verdicts.
+VERDICT_APPROVE = "Looks good to merge"
+VERDICT_NEEDS_REVIEW = "Needs review"
+VERDICT_REQUEST_CHANGES = "Request changes"
+
 
 def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
     """Format severity counts as a parenthetical breakdown, e.g. ' (1 blocker, 2 warnings)'."""
@@ -246,11 +259,11 @@ def derive_verdict(
     unmet = [c for c in (criteria or []) if c.is_unmet]
 
     if blockers or unmet:
-        label, emoji = "Request changes", "\U0001f6d1"
+        label, emoji = VERDICT_REQUEST_CHANGES, "\U0001f6d1"
     elif warnings or (confidence_score is not None and confidence_score.score <= 2):
-        label, emoji = "Needs review", "\u26a0\ufe0f"
+        label, emoji = VERDICT_NEEDS_REVIEW, "\u26a0\ufe0f"
     else:
-        label, emoji = "Looks good to merge", "\u2705"
+        label, emoji = VERDICT_APPROVE, "\u2705"
 
     return Verdict(
         label=label,
@@ -260,6 +273,79 @@ def derive_verdict(
         optional=optional,
         unmet_criteria=unmet,
     )
+
+
+def derive_review_verdict(result: ReviewResult) -> Verdict:
+    """The single verdict every surface reports for a finished review.
+
+    Findings decide it first. A linked ticket Mira could not read is the one
+    other blocker: the ticket's acceptance criteria are part of what was asked
+    for, so an unverifiable ticket can never be approved — it downgrades an
+    otherwise-clean review to "Needs review" with the reason shown, instead of
+    silently reporting a bare "no findings".
+    """
+    confidence = result.walkthrough.confidence_score if result.walkthrough else None
+    verdict = derive_verdict(result.comments, confidence, result.ticket_criteria)
+    if not verdict.has_findings and result.linear_lookup_status == "unavailable":
+        return Verdict(label=VERDICT_NEEDS_REVIEW, emoji="\u26a0\ufe0f")
+    return verdict
+
+
+def ticket_unverified_note(result: ReviewResult) -> str:
+    """Why a referenced ticket could not be graded, or ``""`` when it could."""
+    if result.linear_lookup_status != "unavailable":
+        return ""
+    identifiers = ", ".join(result.linear_issue_ids) or "the linked ticket"
+    detail = f" ({result.linear_lookup_detail})" if result.linear_lookup_detail else ""
+    return (
+        f"Could not read {identifiers}{detail}, so its acceptance criteria are "
+        "unverified — this review is not an approval."
+    )
+
+
+def documentation_paths(paths: list[str]) -> list[str]:
+    """Paths that look like documentation, for the review status block."""
+    return [
+        path
+        for path in paths
+        if path.lower().endswith((".md", ".mdx", ".rst"))
+        or path.lower().startswith(("docs/", "documentation/"))
+    ]
+
+
+def linear_ticket_status(result: ReviewResult) -> tuple[str, bool]:
+    """Ticket row for the review status block: text + whether it verified."""
+    if result.linear_lookup_status == "not_linked":
+        return "N/A — No linked Linear ticket found", True
+    if result.linear_lookup_status != "loaded":
+        identifiers = ", ".join(result.linear_issue_ids)
+        suffix = f" ({identifiers})" if identifiers else ""
+        reason = f" — {result.linear_lookup_detail}" if result.linear_lookup_detail else ""
+        return f"Unknown — Linear ticket could not be checked{suffix}{reason}", False
+
+    links: list[str] = []
+    for index, identifier in enumerate(result.linear_issue_ids):
+        if index < len(result.linear_issue_urls):
+            links.append(f"[{identifier}]({result.linear_issue_urls[index]})")
+        else:
+            links.append(identifier)
+    linked = ", ".join(links)
+    unmet = [c for c in result.ticket_criteria if c.is_unmet]
+    if unmet:
+        count = len(unmet)
+        return (
+            f"No — {linked}; {count} acceptance criterion{'s' if count != 1 else ''} unmet",
+            False,
+        )
+    has_blocking_findings = any(
+        comment.severity in {Severity.BLOCKER, Severity.WARNING} for comment in result.comments
+    )
+    if has_blocking_findings:
+        return f"No — {linked}; blocking review findings remain", False
+    total = len(result.ticket_criteria)
+    if total:
+        return f"Yes — {linked}; all {total} acceptance criteria met", True
+    return f"Yes — {linked}; no explicit acceptance criteria in the ticket", True
 
 
 @dataclass
@@ -349,6 +435,9 @@ class WalkthroughResult:
         additions: int = 0,
         deletions: int = 0,
         ticket_criteria: list[TicketCriterion] | None = None,
+        verdict: Verdict | None = None,
+        verdict_note: str = "",
+        status_rows: list[tuple[str, str]] | None = None,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -370,7 +459,9 @@ class WalkthroughResult:
         # Suppressed during the in-progress render (findings aren't known yet)
         # and on failure (a "looks good" next to a failure notice is wrong).
         if not in_progress and not failure_notice:
-            verdict_lines = self._render_verdict(comments, key_issues, ticket_criteria)
+            verdict_lines = self._render_verdict(
+                comments, key_issues, ticket_criteria, verdict, verdict_note
+            )
             if verdict_lines:
                 parts.append("")
                 parts.extend(verdict_lines)
@@ -386,6 +477,13 @@ class WalkthroughResult:
                 parts.append("```mermaid")
                 parts.append(diagram)
                 parts.append("```")
+        else:
+            # No LLM diagram: fall back to the deterministic change map so every
+            # walkthrough still shows how the change fits together.
+            change_map = self._render_change_map()
+            if change_map:
+                parts.append("")
+                parts.extend(change_map)
 
         issue_lines = self._render_linked_issues(linked_issues, require_issue)
         if issue_lines:
@@ -469,6 +567,16 @@ class WalkthroughResult:
                 parts.append("")
                 parts.append(f"*{separator.join(stats_parts)}*")
 
+        # CI, docs, and ticket verification were a second comment (the review
+        # body) until they moved here — the walkthrough is the one summary, so
+        # the review itself can stay empty and the PR gets a single comment.
+        if status_rows and not in_progress and not failure_notice:
+            parts.append("")
+            parts.append("### Review status")
+            parts.append("")
+            for label, value in status_rows:
+                parts.append(f"- **{label}:** {value}")
+
         if skipped_paths and not in_progress:
             total = len(total_paths) if total_paths else (reviewed_files + len(skipped_paths))
             shown = min(8, len(skipped_paths))
@@ -522,26 +630,62 @@ class WalkthroughResult:
 
         return "\n".join(parts)
 
+    def _render_change_map(self) -> list[str]:
+        """Deterministic Mermaid map of the changed files, grouped by cohort.
+
+        Used when the model produced no sequence diagram, so the walkthrough
+        always shows how the pieces relate. Capped so a 100-file PR can't
+        produce an unreadable diagram.
+        """
+        if not self.file_changes:
+            return []
+
+        entries = self.file_changes[:_CHANGE_MAP_LIMIT]
+        group_ids: dict[str, str] = {}
+        lines = ["flowchart LR", '  pr["Pull request"]']
+        for index, entry in enumerate(entries):
+            group = entry.group.strip() or "Changed files"
+            if group not in group_ids:
+                group_id = f"g{len(group_ids)}"
+                group_ids[group] = group_id
+                safe_group = " ".join(group.split()).replace('"', "'")
+                lines.append(f'  {group_id}["{safe_group}"]')
+                lines.append(f"  pr --> {group_id}")
+            file_id = f"f{index}"
+            safe_path = entry.path.replace('"', "'")
+            lines.append(f'  {file_id}["{safe_path}"]')
+            lines.append(f"  {group_ids[group]} --> {file_id}")
+        remaining = len(self.file_changes) - len(entries)
+        if remaining:
+            lines.append(f'  more["+{remaining} more files"]')
+            lines.append("  pr --> more")
+        return ["```mermaid", *lines, "```"]
+
     def _render_verdict(
         self,
         comments: list[ReviewComment] | None,
         key_issues: list[KeyIssue] | None,
         ticket_criteria: list[TicketCriterion] | None = None,
+        verdict: Verdict | None = None,
+        note: str = "",
     ) -> list[str]:
         """Render the verdict headline plus exactly what must change.
 
         The headline is derived from the final findings rather than the model's
         free-form label, so a "Request changes" verdict is always accompanied by
-        the blocker/warning list that justifies it.
+        the blocker/warning list that justifies it. Callers that already derived
+        the review verdict pass it in so the headline, the review-body verdict
+        row, and the check run can never disagree.
         """
         cs = self.confidence_score
-        verdict = derive_verdict(comments, cs, ticket_criteria)
+        if verdict is None:
+            verdict = derive_verdict(comments, cs, ticket_criteria)
 
         # Nothing to say: no score, no findings, no key issues, no criteria.
         has_findings = bool(
             verdict.blockers or verdict.warnings or verdict.optional or verdict.unmet_criteria
         )
-        if cs is None and not has_findings and not key_issues and not ticket_criteria:
+        if cs is None and not has_findings and not key_issues and not ticket_criteria and not note:
             return []
 
         lines = [f"## Verdict: {verdict.emoji} {verdict.label}", ""]
@@ -553,6 +697,9 @@ class WalkthroughResult:
             if reason:
                 line += f" — {reason}"
             lines.append(line)
+            lines.append("")
+        if note:
+            lines.append(f"> {note}")
             lines.append("")
 
         if verdict.blockers:
@@ -659,27 +806,48 @@ class WalkthroughResult:
         return lines
 
     def _render_changes(self) -> list[str]:
-        """Render per-file change descriptions grouped into logical cohorts."""
+        """Render per-file change descriptions grouped into logical cohorts.
+
+        Collapsed behind a ``<details>`` so a large PR's file list doesn't
+        dominate the comment — the summary and verdict stay above the fold —
+        and capped so a 100-file PR can't produce a wall of text.
+        """
         if not self.file_changes:
             return []
         grouped: dict[str, list[WalkthroughFileEntry]] = {}
         for entry in self.file_changes:
             grouped.setdefault(entry.group or "Other changes", []).append(entry)
 
-        lines = ["### What changed", ""]
+        total = len(self.file_changes)
+        lines = [
+            "<details>",
+            f"<summary><b>What changed</b> — {total} file{'s' if total != 1 else ''}</summary>",
+            "",
+        ]
+        rendered = 0
+        skipped = 0
         for group, entries in grouped.items():
-            lines.append(f"**{group}**")
-            lines.append("")
+            bullets: list[str] = []
             for entry in entries:
+                if rendered >= _CHANGES_DISPLAY_LIMIT:
+                    skipped += 1
+                    continue
                 change = _CHANGE_TYPE_NAME.get(entry.change_type, "Modified")
                 line = f"- **{change}** `{entry.path}`"
                 description = entry.description.strip()
                 if description:
                     line += f" — {description}"
-                lines.append(line)
+                bullets.append(line)
+                rendered += 1
+            if bullets:
+                lines.append(f"**{group}**")
+                lines.append("")
+                lines.extend(bullets)
+                lines.append("")
+        if skipped:
+            lines.append(f"_…and {skipped} more file{'s' if skipped != 1 else ''}_")
             lines.append("")
-        while lines and lines[-1] == "":
-            lines.pop()
+        lines.append("</details>")
         return lines
 
 
@@ -719,6 +887,9 @@ class ReviewResult:
     linear_issue_ids: list[str] = field(default_factory=list)
     linear_issue_urls: list[str] = field(default_factory=list)
     linear_lookup_status: str = "not_linked"
+    # Why a referenced ticket could not be graded (missing key, API error, not
+    # found), shown next to the "Unknown" verdict so it is actionable.
+    linear_lookup_detail: str = ""
     # Diagnostic trail: per-chunk draft counts and every comment dropped by a
     # filter/critique stage, so a benchmark run can show whether a missed
     # finding was never drafted or drafted-then-dropped. Not posted anywhere.

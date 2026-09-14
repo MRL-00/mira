@@ -13,17 +13,23 @@ from mira.llm.response_parser import (
     parse_walkthrough_response,
 )
 from mira.models import (
+    VERDICT_NEEDS_REVIEW,
     WALKTHROUGH_MARKER,
     FileChangeType,
     FileDiff,
     HunkInfo,
     ReviewComment,
+    ReviewResult,
     Severity,
+    TicketCriterion,
+    Verdict,
     WalkthroughConfidenceScore,
     WalkthroughEffort,
     WalkthroughFileEntry,
     WalkthroughResult,
     build_review_stats,
+    derive_review_verdict,
+    ticket_unverified_note,
 )
 
 
@@ -443,6 +449,33 @@ class TestWalkthroughToMarkdown:
         assert "### Sequence Diagram" not in md
         assert "```mermaid" not in md
 
+    def test_change_map_rendered_without_sequence_diagram(self):
+        """The deterministic map keeps a Mermaid diagram in every walkthrough."""
+        result = WalkthroughResult(
+            summary="Changes.",
+            file_changes=[
+                WalkthroughFileEntry("a.py", FileChangeType.MODIFIED, "x", "Core"),
+                WalkthroughFileEntry("b.py", FileChangeType.ADDED, "y", "Tests"),
+            ],
+        )
+        md = result.to_markdown()
+        assert "```mermaid" in md
+        assert 'pr["Pull request"]' in md
+        assert 'f0["a.py"]' in md
+        assert 'f1["b.py"]' in md
+
+    def test_sequence_diagram_wins_over_change_map(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            sequence_diagram="graph LR\n  a-->b",
+            file_changes=[
+                WalkthroughFileEntry("a.py", FileChangeType.MODIFIED, "x", "Core"),
+            ],
+        )
+        md = result.to_markdown()
+        assert md.count("```mermaid") == 1
+        assert "a-->b" in md
+
     def test_with_confidence_score(self):
         from mira.models import WalkthroughConfidenceScore
 
@@ -528,6 +561,36 @@ class TestWalkthroughToMarkdown:
         md = result.to_markdown(failure_notice="boom")
         assert "## Verdict:" not in md
 
+    def test_passed_verdict_and_note_render(self):
+        """An engine-derived verdict plus its reason drives the headline."""
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            verdict=Verdict(label=VERDICT_NEEDS_REVIEW, emoji="\u26a0\ufe0f"),
+            verdict_note="Could not read EPIC-1113 — no Linear API key set.",
+        )
+        assert "## Verdict: \u26a0\ufe0f Needs review" in md
+        assert "> Could not read EPIC-1113 — no Linear API key set." in md
+
+    def test_review_status_rows_render(self):
+        """CI/docs/ticket status lives in the walkthrough, not a second comment."""
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            status_rows=[
+                ("Tests", "GitHub checks: 604 passed, 0 failed, 8 skipped, 0 pending"),
+                ("Documentation", "Yes — `docs/review.md`"),
+                ("Linked ticket", "Yes — [EPIC-1113](https://linear.app/x); all 8 criteria met"),
+            ]
+        )
+        assert "### Review status" in md
+        assert "- **Tests:** GitHub checks: 604 passed" in md
+        assert "- **Documentation:** Yes — `docs/review.md`" in md
+        assert "- **Linked ticket:** Yes — [EPIC-1113]" in md
+
+    def test_review_status_suppressed_in_progress(self):
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(in_progress=True, status_rows=[("Tests", "x")])
+        assert "### Review status" not in md
+
     def test_optional_suggestions_collapsed(self):
         result = WalkthroughResult(summary="Changes.")
         md = result.to_markdown(comments=[self._comment(Severity.SUGGESTION)])
@@ -544,11 +607,27 @@ class TestWalkthroughToMarkdown:
             ],
         )
         md = result.to_markdown()
-        assert "### What changed" in md
+        # Collapsed so a large file list doesn't dominate the comment.
+        assert "<details>" in md
+        assert "<summary><b>What changed</b> — 3 files</summary>" in md
         assert "**Core**" in md
         assert "**Tests**" in md
         assert "- **Added** `a.py` — New helper" in md
         assert "- **Modified** `b.py` — Wire it up" in md
+
+    def test_changes_section_caps_file_list(self):
+        result = WalkthroughResult(
+            summary="Changes.",
+            file_changes=[
+                WalkthroughFileEntry(f"f{i}.py", FileChangeType.MODIFIED, "x", "Core")
+                for i in range(40)
+            ],
+        )
+        md = result.to_markdown()
+        assert "<summary><b>What changed</b> — 40 files</summary>" in md
+        assert "- **Modified** `f14.py` — x" in md
+        assert "- **Modified** `f15.py` — x" not in md
+        assert "_…and 25 more files_" in md
 
     def test_linked_issues_rendered(self):
         from mira.models import LinkedIssue
@@ -683,6 +762,60 @@ class TestWalkthroughToMarkdown:
         md = result.to_markdown()
         assert "### Changes" not in md
         assert "| File |" not in md
+
+
+class TestDeriveReviewVerdict:
+    """The one verdict shared by the walkthrough, review body, and check run."""
+
+    def _blocker(self) -> ReviewComment:
+        return ReviewComment(
+            path="a.py",
+            line=1,
+            end_line=None,
+            severity=Severity.BLOCKER,
+            category="bug",
+            title="Boom",
+            body="b",
+            confidence=0.9,
+        )
+
+    def test_clean_review_approves(self):
+        assert derive_review_verdict(ReviewResult(summary="ok")).label == "Looks good to merge"
+
+    def test_unmet_criterion_requests_changes(self):
+        result = ReviewResult(
+            ticket_criteria=[TicketCriterion("EPIC-1", "Do the thing", "unmet", "missing")]
+        )
+        assert derive_review_verdict(result).label == "Request changes"
+
+    def test_unverified_ticket_downgrades_approval(self):
+        result = ReviewResult(
+            summary="ok",
+            linear_issue_ids=["EPIC-1113"],
+            linear_lookup_status="unavailable",
+            linear_lookup_detail="no Linear API key set",
+        )
+        verdict = derive_review_verdict(result)
+        assert verdict.label == VERDICT_NEEDS_REVIEW
+        assert "EPIC-1113" in ticket_unverified_note(result)
+        assert "no Linear API key set" in ticket_unverified_note(result)
+
+    def test_unverified_ticket_keeps_blocking_verdict(self):
+        """A blocker already blocks; the ticket note must not soften it."""
+        result = ReviewResult(
+            comments=[self._blocker()],
+            linear_lookup_status="unavailable",
+        )
+        assert derive_review_verdict(result).label == "Request changes"
+
+    def test_loaded_ticket_is_not_downgraded(self):
+        result = ReviewResult(
+            summary="ok",
+            linear_issue_ids=["EPIC-1113"],
+            linear_lookup_status="loaded",
+        )
+        assert derive_review_verdict(result).label == "Looks good to merge"
+        assert ticket_unverified_note(result) == ""
 
 
 class TestBuildReviewStats:

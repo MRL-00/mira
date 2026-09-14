@@ -270,7 +270,8 @@ class GitLabProvider(BaseProvider):
         pr_info: PRInfo,
         result: ReviewResult,
         bot_name: str = "miracodeai",
-        request_changes: bool = False,
+        request_changes: bool | None = None,
+        verdict_label: str | None = None,
     ) -> None:
         # GitLab has no merge-blocking "request changes" review state; the
         # verdict is carried by the walkthrough comment instead.
