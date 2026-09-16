@@ -63,7 +63,7 @@ query MiraIssue($id: String!) {
     url
     description
     priorityLabel
-    state { name }
+    state { name type }
     assignee { displayName }
     labels { nodes { name } }
     comments(first: 30) {
@@ -294,6 +294,7 @@ class LinearClient:
             title=str(issue.get("title") or ""),
             url=str(issue.get("url") or ""),
             state=str(state.get("name") or "") if isinstance(state, dict) else "",
+            state_type=str(state.get("type") or "") if isinstance(state, dict) else "",
             description=_truncate(description),
             criteria=extract_acceptance_criteria(description),
             labels=labels,

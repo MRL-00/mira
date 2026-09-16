@@ -1,6 +1,11 @@
 llm:
   model: deepseek/deepseek-v4.1-flash:exacto
   indexing_model: deepseek/deepseek-v4.1-flash
+  # Ticket grading is one small call per review but has to reason about what
+  # the diff does and does not prove. The flash tier with reasoning off
+  # hallucinated "unmet" on real code (EpicApi#692), so it runs on Sonnet.
+  ticket_model: anthropic/claude-sonnet-4-6
+  ticket_reasoning_effort: medium
   max_tokens: 8192
 
 filter:

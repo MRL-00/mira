@@ -6,6 +6,7 @@ import contextlib
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -153,7 +154,11 @@ def _clamp_confidence_to_findings(
 
     Rubric (1=major concerns, 5=safe to merge):
       - ≥1 blocker → score ≤ 2
-      - ≥3 warnings (and no blocker) → score ≤ 3
+      - ≥1 unmet ticket criterion or ≥3 warnings (and no blocker) → score ≤ 3
+
+    Unmet ticket criteria are advisory ("Needs review"), never a "Request
+    changes": the grader only sees the diff and is regularly wrong about code
+    it cannot see.
     """
     cs = walkthrough.confidence_score
     if cs is None:
@@ -173,13 +178,14 @@ def _clamp_confidence_to_findings(
             f"Found {blockers} blocker{'s' if blockers != 1 else ''} "
             f"that must be fixed before merge: {_format_findings_for_reason(blocker_comments)}."
         )
-    elif unmet_criteria and cs.score > 2:
-        cs.score = 2
-        cs.label = "Request changes"
+    elif unmet_criteria and cs.score > 3:
+        cs.score = 3
+        cs.label = "Needs review"
         names = "; ".join(f'"{c.criterion}" (`{c.issue}`)' for c in unmet_criteria[:5])
         cs.reason = (
             f"{len(unmet_criteria)} linked-ticket requirement"
-            f"{'s' if len(unmet_criteria) != 1 else ''} not met: {names}."
+            f"{'s' if len(unmet_criteria) != 1 else ''} could not be confirmed from the "
+            f"diff — please check: {names}."
         )
     elif warnings >= 3 and cs.score > 3:
         cs.score = 3
@@ -192,16 +198,16 @@ def _clamp_confidence_to_findings(
     # A score without a reason is the exact complaint this section exists to
     # fix — always leave the reader something concrete to act on.
     if not cs.reason.strip():
-        if unmet_criteria:
-            cs.reason = (
-                "Linked-ticket requirements not met: "
-                + "; ".join(f'"{c.criterion}"' for c in unmet_criteria[:5])
-                + "."
-            )
-        elif blocker_comments:
+        if blocker_comments:
             cs.reason = f"Blockers found: {_format_findings_for_reason(blocker_comments)}."
         elif warning_comments:
             cs.reason = f"Warnings found: {_format_findings_for_reason(warning_comments)}."
+        elif unmet_criteria:
+            cs.reason = (
+                "Linked-ticket requirements to check: "
+                + "; ".join(f'"{c.criterion}"' for c in unmet_criteria[:5])
+                + "."
+            )
         else:
             cs.reason = "No blockers or warnings found in the changed code."
 
@@ -472,11 +478,13 @@ class ReviewEngine:
         dry_run: bool = False,
         indexing_llm: LLMProviderProtocol | None = None,
         security_llm: LLMProviderProtocol | None = None,
+        ticket_llm: LLMProviderProtocol | None = None,
     ) -> None:
         self.config = config
         self.llm = llm
         self.indexing_llm = indexing_llm or llm
         self.security_llm = security_llm or llm
+        self.ticket_llm = ticket_llm or llm
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
@@ -707,7 +715,7 @@ class ReviewEngine:
         ticket_task = None
         if linked_issues and full_diff_text.strip():
             ticket_task = _asyncio.create_task(
-                verify_ticket_criteria(self.llm, linked_issues, full_diff_text)
+                verify_ticket_criteria(self.ticket_llm, linked_issues, full_diff_text)
             )
         if review_round >= 2 and pr_info.head_sha:
             try:
@@ -1002,6 +1010,8 @@ class ReviewEngine:
                         verdict_note=verdict_note,
                         status_rows=status_rows or None,
                         outstanding_count=len(result.outstanding_comments),
+                        reviewed_sha=pr_info.head_sha,
+                        reviewed_at=datetime.now(UTC),
                     )
                     comment_id = placeholder_id
                     if comment_id is None:

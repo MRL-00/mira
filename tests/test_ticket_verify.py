@@ -30,6 +30,41 @@ class TestVerifyTicketCriteria:
     async def test_no_issues_returns_empty(self):
         assert await verify_ticket_criteria(_llm("{}"), [], "diff") == []
 
+    async def test_completed_tickets_are_not_graded(self):
+        """A related epic that already shipped is context, not this PR's checklist."""
+        llm = _llm("{}")
+        shipped = LinkedIssue(
+            identifier="ENG-1",
+            title="Old epic",
+            state="Deployed",
+            state_type="completed",
+            criteria=["Consume the stream"],
+        )
+        assert await verify_ticket_criteria(llm, [shipped], "diff --git ...") == []
+        llm.complete_with_tools.assert_not_awaited()
+
+    async def test_only_open_tickets_reach_the_prompt(self):
+        llm = _llm(json.dumps({"criteria": []}))
+        shipped = LinkedIssue(
+            identifier="ENG-1", state_type="completed", criteria=["Consume the stream"]
+        )
+        result = await verify_ticket_criteria(llm, [shipped, *_issues()], "diff --git ...")
+        prompt = llm.complete_with_tools.await_args.kwargs["messages"][0]["content"]
+        assert "### ENG-482" in prompt
+        assert "### ENG-1" not in prompt
+        # The skipped ticket's criteria are not back-filled as "unclear" either.
+        assert {c.issue for c in result} == {"ENG-482"}
+
+    async def test_prompt_steers_unseen_code_to_unclear_and_comments_to_background(self):
+        llm = _llm(json.dumps({"criteria": []}))
+        issue = _issues()[0]
+        issue.comments = ["Michelle: also keep rejecting on the Booking stream"]
+        await verify_ticket_criteria(llm, [issue], "diff --git ...")
+        prompt = llm.complete_with_tools.await_args.kwargs["messages"][0]["content"]
+        assert "outside the diff" in prompt and "`unclear`, never `unmet`" in prompt
+        assert "do not grade them as requirements" in prompt
+        assert "Do not invent requirements that appear only in ticket comments" in prompt
+
     async def test_empty_diff_returns_empty(self):
         assert await verify_ticket_criteria(_llm("{}"), _issues(), "") == []
 

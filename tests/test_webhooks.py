@@ -285,7 +285,31 @@ async def test_review_comment_reject_triggers_handler(
     mock_handler.assert_awaited_once()
 
 
+@patch("mira.platforms.github.webhook.handle_thread_reply_unmentioned", new_callable=AsyncMock)
+async def test_review_comment_reply_without_mention_dispatched(
+    mock_handler: AsyncMock, client: AsyncClient
+) -> None:
+    """A reply inside a thread is handed to the reply handler even with no mention;
+    the handler decides whether the thread is Mira's."""
+    payload = _review_comment_payload("Just a regular reply")
+    payload["comment"]["in_reply_to_id"] = 123
+    payload_bytes = json.dumps(payload).encode()
+    resp = await client.post(
+        "/webhook",
+        content=payload_bytes,
+        headers={
+            "X-Hub-Signature-256": _sign(payload_bytes),
+            "X-GitHub-Event": "pull_request_review_comment",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "processing"
+    mock_handler.assert_awaited_once()
+
+
 async def test_review_comment_without_mention_ignored(client: AsyncClient) -> None:
+    """A brand-new inline comment (not a reply) with no mention is not Mira's business."""
     payload = _review_comment_payload("Just a regular reply")
     payload_bytes = json.dumps(payload).encode()
     resp = await client.post(

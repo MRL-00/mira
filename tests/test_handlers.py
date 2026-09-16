@@ -14,6 +14,7 @@ from mira.platforms.github.webhook import (
     handle_pause_resume,
     handle_pull_request,
     handle_thread_reject,
+    handle_thread_reply_unmentioned,
 )
 from mira.platforms.handlers import _REJECT_KEYWORDS
 
@@ -239,6 +240,61 @@ async def test_handle_comment_review_keyword(
     mock_engine.review_pr.assert_awaited_once()
 
 
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
+async def test_handle_comment_review_reacts_to_the_command(
+    mock_config: MagicMock,
+    mock_llm_cls: MagicMock,
+    mock_provider_cls: MagicMock,
+    mock_engine_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """The command comment gets 👀 on pickup and 🚀 on completion, so a re-review
+    that edits the walkthrough in place is still visibly acknowledged."""
+    mock_config.return_value = MagicMock()
+    mock_engine = AsyncMock()
+    mock_engine.review_pr = AsyncMock(return_value=ReviewResult(summary="ok"))
+    mock_engine_cls.return_value = mock_engine
+    mock_provider = AsyncMock()
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_comment_payload("@mira-bot review")
+    payload["comment"]["id"] = 9001
+    await handle_comment(payload, mock_app_auth, "mira-bot")
+
+    reactions = [c.args[2] for c in mock_provider.react_to_comment.await_args_list]
+    assert reactions == ["eyes", "rocket"]
+    assert all(c.args[1] == 9001 for c in mock_provider.react_to_comment.await_args_list)
+
+
+@patch("mira.platforms.handlers.ReviewEngine")
+@patch("mira.platforms.github.webhook.create_provider")
+@patch("mira.platforms.handlers.create_llm")
+@patch("mira.platforms.handlers.load_config")
+async def test_handle_comment_review_reacts_confused_on_failure(
+    mock_config: MagicMock,
+    mock_llm_cls: MagicMock,
+    mock_provider_cls: MagicMock,
+    mock_engine_cls: MagicMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    mock_config.return_value = MagicMock()
+    mock_engine = AsyncMock()
+    mock_engine.review_pr = AsyncMock(side_effect=RuntimeError("boom"))
+    mock_engine_cls.return_value = mock_engine
+    mock_provider = AsyncMock()
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_comment_payload("@mira-bot review")
+    payload["comment"]["id"] = 9001
+    await handle_comment(payload, mock_app_auth, "mira-bot")
+
+    reactions = [c.args[2] for c in mock_provider.react_to_comment.await_args_list]
+    assert reactions == ["eyes", "confused"]
+
+
 @patch("mira.platforms.github.webhook.create_provider")
 @patch("mira.platforms.handlers.create_llm")
 @patch("mira.platforms.handlers.load_config")
@@ -407,6 +463,46 @@ async def test_handle_thread_reject_exits_early_for_non_reject_command(
     await handle_thread_reject(payload, mock_app_auth, "mira-bot")
 
     mock_provider.get_thread_id_for_comment.assert_not_awaited()
+
+
+@patch("mira.platforms.github.webhook._handle_thread_freeform_reply", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.create_provider")
+async def test_unmentioned_reply_in_bot_thread_is_answered(
+    mock_provider_cls: MagicMock,
+    mock_freeform: AsyncMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    """A plain reply under one of Mira's inline comments gets the same treatment
+    as an @-mentioned one — developers rarely tag the bot when answering it."""
+    mock_provider = AsyncMock()
+    mock_provider.get_comment_author = AsyncMock(return_value="mira-bot[bot]")
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_review_comment_payload("No, that's handled by the policy object.")
+    payload["comment"]["in_reply_to_id"] = 555
+    await handle_thread_reply_unmentioned(payload, mock_app_auth, "mira-bot")
+
+    mock_provider.get_comment_author.assert_awaited_once()
+    assert mock_provider.get_comment_author.await_args.args[1] == 555
+    mock_freeform.assert_awaited_once_with(payload, mock_app_auth, "mira-bot")
+
+
+@patch("mira.platforms.github.webhook._handle_thread_freeform_reply", new_callable=AsyncMock)
+@patch("mira.platforms.github.webhook.create_provider")
+async def test_unmentioned_reply_in_human_thread_is_ignored(
+    mock_provider_cls: MagicMock,
+    mock_freeform: AsyncMock,
+    mock_app_auth: AsyncMock,
+) -> None:
+    mock_provider = AsyncMock()
+    mock_provider.get_comment_author = AsyncMock(return_value="bob")
+    mock_provider_cls.return_value = mock_provider
+
+    payload = _make_review_comment_payload("Agreed, let's do that.")
+    payload["comment"]["in_reply_to_id"] = 555
+    await handle_thread_reply_unmentioned(payload, mock_app_auth, "mira-bot")
+
+    mock_freeform.assert_not_awaited()
 
 
 @patch("mira.platforms.github.webhook.create_provider")

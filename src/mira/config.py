@@ -45,6 +45,14 @@ class LLMConfig(BaseModel):
     # the security sweep is the highest-stakes pass and must not silently
     # downgrade to the indexing tier.
     security_model: str | None = None
+    # Optional dedicated model for grading linked-ticket acceptance criteria.
+    # One small call per review, but it has to reason about what a diff does
+    # and does not prove — a fast/no-reasoning tier hallucinates "unmet".
+    # Falls back to `review_model`, then `model`.
+    ticket_model: str | None = None
+    # Reasoning effort for the ticket-grading call, independent of
+    # `review_reasoning_effort`. None/"off" = whatever the provider defaults to.
+    ticket_reasoning_effort: str | None = None
     # Extended-thinking effort for reviews ("off"/"low"/"medium"/"high"/"xhigh"/"max";
     # None/"off" = no reasoning). `review_reasoning_effort` is the mira.yaml-level override;
     # `reasoning_effort` is the resolved value the provider reads (set by
@@ -277,9 +285,10 @@ class ReviewConfig(BaseModel):
     auto_resolve_conversations: bool = True
 
     # Submit the platform review as "Request changes" (not a plain comment) when
-    # the derived verdict is "Request changes" — i.e. there is a blocker or a
-    # linked-ticket acceptance criterion the PR does not satisfy. This actively
-    # blocks merge on hosts that honour it. Set false to always comment.
+    # the derived verdict is "Request changes" — i.e. there is a code blocker.
+    # Linked-ticket criteria graded unmet are advisory and never block on their
+    # own. This actively blocks merge on hosts that honour it. Set false to
+    # always comment.
     request_changes_on_blocker: bool = True
 
     # Publish a GitHub check run for each review so Mira appears in the PR's

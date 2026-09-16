@@ -350,7 +350,7 @@ class TestPostReviewRequestChanges:
 
     @pytest.mark.asyncio
     async def test_request_changes_posts_without_inline_comments(self):
-        """An unmet ticket criterion blocks merge even with no inline findings."""
+        """A still-open blocker from an earlier round blocks merge with no new inlines."""
         calls: list[dict] = []
 
         def _create_review(**kwargs):
@@ -360,6 +360,28 @@ class TestPostReviewRequestChanges:
             return review
 
         provider, mock_pr = self._provider(create_review=_create_review)
+        result = ReviewResult(
+            summary="Blocker still open",
+            outstanding_comments=[self._comment()],
+        )
+        await provider.post_review(_make_pr_info(), result, request_changes=True)
+        assert len(calls) == 1
+        assert calls[0]["event"] == "REQUEST_CHANGES"
+        assert calls[0]["comments"] == []
+        mock_pr.create_review_comment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unmet_ticket_criterion_posts_as_comment(self):
+        """Ticket grading is advisory: an unmet criterion never requests changes."""
+        calls: list[dict] = []
+
+        def _create_review(**kwargs):
+            calls.append(kwargs)
+            review = MagicMock()
+            review.get_comments.return_value = []
+            return review
+
+        provider, _ = self._provider(create_review=_create_review)
         result = ReviewResult(
             summary="Ticket criterion unmet",
             ticket_criteria=[
@@ -371,11 +393,10 @@ class TestPostReviewRequestChanges:
                 )
             ],
         )
-        await provider.post_review(_make_pr_info(), result, request_changes=True)
-        assert len(calls) == 1
-        assert calls[0]["event"] == "REQUEST_CHANGES"
-        assert calls[0]["comments"] == []
-        mock_pr.create_review_comment.assert_not_called()
+        await provider.post_review(_make_pr_info(), result)
+        # Nothing to block and nothing inline → no review at all; the
+        # walkthrough comment carries the ticket checklist.
+        assert calls == []
 
     @pytest.mark.asyncio
     async def test_no_content_and_no_request_changes_posts_nothing(self):
@@ -699,8 +720,8 @@ class TestReviewVerdict:
         assert event == "COMMENT"
         assert body == ""
 
-    def test_unmet_criterion_names_itself_in_the_blocking_body(self):
-        """A blocker with no inline comments must still say what has to change."""
+    def test_unmet_criterion_is_a_plain_comment(self):
+        """Ticket grading is advisory — it never produces a REQUEST_CHANGES review."""
         result = ReviewResult(
             ticket_criteria=[
                 TicketCriterion(
@@ -712,12 +733,34 @@ class TestReviewVerdict:
             ],
         )
 
+        body, event = _review_body_and_event(result, MagicMock())
+
+        assert event == "COMMENT"
+        assert body == ""
+
+    def test_outstanding_blocker_names_itself_in_the_blocking_body(self):
+        """A blocker with no new inline comments must still say what has to change."""
+        result = ReviewResult(
+            outstanding_comments=[
+                ReviewComment(
+                    path="src/handler.py",
+                    line=12,
+                    end_line=None,
+                    severity=Severity.BLOCKER,
+                    category="bug",
+                    title="Unbounded retry loop",
+                    body="Cap the retries.",
+                    confidence=0.9,
+                )
+            ],
+        )
+
         body, event = _review_body_and_event(result, MagicMock(), request_changes=True)
 
         assert event == "REQUEST_CHANGES"
         assert "Request changes" in body
-        assert "EPIC-1113" in body
-        assert "Readers honour autoPaidEnabled" in body
+        assert "`src/handler.py:12`" in body
+        assert "Unbounded retry loop" in body
 
     def test_config_keeps_a_blocker_advisory(self):
         result = ReviewResult(comments=[_blocker_comment()])
@@ -759,8 +802,17 @@ class TestReviewVerdict:
         provider._github = MagicMock()
         provider._github.get_repo.return_value = repo
         result = ReviewResult(
-            ticket_criteria=[
-                TicketCriterion(issue="EPIC-1113", criterion="Do X", status="unmet", evidence="no")
+            outstanding_comments=[
+                ReviewComment(
+                    path="src/handler.py",
+                    line=12,
+                    end_line=None,
+                    severity=Severity.BLOCKER,
+                    category="bug",
+                    title="Unbounded retry loop",
+                    body="Cap the retries.",
+                    confidence=0.9,
+                )
             ],
         )
 
@@ -769,7 +821,7 @@ class TestReviewVerdict:
         kwargs = pr.create_review.call_args.kwargs
         assert kwargs["event"] == "REQUEST_CHANGES"
         assert kwargs["comments"] == []
-        assert "EPIC-1113" in kwargs["body"]
+        assert "Unbounded retry loop" in kwargs["body"]
 
 
 class TestReviewStatusRows:

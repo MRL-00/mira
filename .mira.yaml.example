@@ -12,6 +12,13 @@ llm:
   temperature: 0.2
   max_tokens: 4096
 
+  # Optional dedicated model for grading linked-ticket acceptance criteria
+  # (one small call per review). It has to reason about what a diff does and
+  # does not prove, so a fast/no-reasoning tier tends to hallucinate "unmet".
+  # Falls back to review_model, then model.
+  # ticket_model: "anthropic/claude-sonnet-4-6"
+  # ticket_reasoning_effort: "medium"
+
   # ── AWS Bedrock configuration (uncomment to use) ──
   # provider: "bedrock"
   # model: "us.anthropic.claude-sonnet-4-6-v1:0"
@@ -76,8 +83,9 @@ review:
   # descriptions are grounded in the actual code (0 = metadata only)
   walkthrough_diff_budget: 40000
   # Submit the review as "Request changes" (blocking merge) when the verdict is
-  # Request changes — a blocker, or an unmet acceptance criterion on a linked
-  # ticket. Set false to always post a plain comment.
+  # Request changes, i.e. a code blocker. Linked-ticket criteria Mira grades
+  # as unmet are advisory ("Needs review") and never request changes on their
+  # own. Set false to always post a plain comment.
   request_changes_on_blocker: true
   # Publish a GitHub check run for each review so Mira shows up in the PR's
   # checks list and can be required by branch protection. Needs the GitHub

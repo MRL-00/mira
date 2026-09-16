@@ -208,6 +208,7 @@ def review(
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
     security_llm = create_llm(llm_config_for("security", config.llm))
+    ticket_llm = create_llm(llm_config_for("ticket", config.llm))
 
     git_token = token or github_token
     github_provider = None
@@ -242,6 +243,7 @@ def review(
         dry_run=dry_run,
         indexing_llm=indexing_llm,
         security_llm=security_llm,
+        ticket_llm=ticket_llm,
     )
 
     try:

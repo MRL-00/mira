@@ -1,11 +1,15 @@
 """Verify that a PR satisfies every requirement of its linked tracker tickets.
 
 Runs after the diff is fetched and before the walkthrough is finalized. For
-each linked issue it grades every explicit acceptance criterion (and, when the
-ticket states none, the requirements derived from its description) against the
-diff. Anything the model does not address is surfaced as ``unclear`` rather
-than silently passing, and any ``unmet`` criterion forces a "Request changes"
-verdict.
+each linked issue still in progress it grades every explicit acceptance
+criterion (and, when the ticket states none, the requirements derived from its
+description) against the diff. Anything the model does not address is surfaced
+as ``unclear`` rather than silently passing.
+
+The grade is advisory. The model only sees the diff, so it regularly cannot
+tell whether a requirement is met; the prompt steers it to ``unclear`` in that
+case, and the engine turns an ``unmet`` into a "Needs review" prompt for the
+human reviewer rather than a blocking "Request changes".
 """
 
 from __future__ import annotations
@@ -64,7 +68,9 @@ def _render_issue(issue: LinkedIssue) -> str:
         lines.extend(f"- {c}" for c in issue.children)
     if issue.comments:
         lines.append("")
-        lines.append("Recent ticket comments:")
+        lines.append(
+            "Recent ticket comments (background only — do not grade them as requirements):"
+        )
         lines.extend(f"- {c}" for c in issue.comments[:_MAX_COMMENTS])
     return "\n".join(lines)
 
@@ -73,18 +79,31 @@ def _build_prompt(issues: list[LinkedIssue], diff_text: str) -> str:
     tickets = "\n\n".join(_render_issue(i) for i in issues)
     diff = _truncate_on_line(diff_text, _MAX_DIFF_CHARS)
     return (
-        "You are verifying whether a pull request satisfies the linked tracker "
-        "ticket(s). For every requirement, output exactly one entry with a status:\n\n"
-        "- `met` — the diff demonstrably implements the requirement.\n"
-        "- `unmet` — the diff shows it was missed, done incorrectly, or not "
-        "implemented at all. Partial or incomplete work counts as unmet.\n"
-        "- `unclear` — you genuinely cannot tell from the diff alone.\n\n"
-        "Be strict. A requirement is only `met` when the diff actually implements "
-        "it. Grade EVERY explicit acceptance criterion — do not omit any. When a "
-        "ticket states no explicit criteria, derive the concrete requirements "
-        "from its description and comments, then grade each one. Quote the "
-        "requirement in `criterion` so the author can see exactly what was "
-        "checked.\n\n"
+        "You are checking whether a pull request satisfies the linked tracker "
+        "ticket(s). You can see ONLY the diff — not the rest of the codebase, not "
+        "the test runner output. For every requirement, output exactly one entry "
+        "with a status:\n\n"
+        "- `met` — the diff demonstrably implements the requirement (cite the "
+        "hunk).\n"
+        "- `unmet` — the diff itself contradicts the requirement or implements it "
+        "incorrectly. Only use this when you can point at changed lines that are "
+        "wrong.\n"
+        "- `unclear` — the diff does not prove it either way.\n\n"
+        "Rules:\n"
+        "- If the decisive code is outside the diff (a called method, a policy "
+        "object, another stream/handler), the answer is `unclear`, never `unmet`. "
+        "Do not guess what unseen code does.\n"
+        '- A requirement that existing behaviour is KEPT ("still rejects", '
+        '"unchanged", "unaffected") is `met` when the diff leaves that code '
+        "alone, or `unclear` — the absence of a change is not a failure.\n"
+        "- A unit test that asserts the behaviour counts as evidence for `met`, "
+        "even when it uses mocks.\n"
+        "- Grade EVERY explicit acceptance criterion — do not omit any. Only when "
+        "a ticket lists no explicit criteria, derive the concrete requirements "
+        "from its description (not from its comments) and grade those.\n"
+        "- Do not invent requirements that appear only in ticket comments.\n"
+        "- Quote the requirement in `criterion` so the author can see exactly "
+        "what was checked.\n\n"
         "## Linked tickets\n\n"
         f"{tickets}\n\n"
         "## Pull request diff\n\n"
@@ -140,6 +159,10 @@ async def verify_ticket_criteria(
     each explicit criterion so a ticket reference is never silently treated as
     satisfied.
     """
+    # A ticket that is already completed (or canceled) was delivered by an
+    # earlier PR; grading its criteria here only adds noise, and a "related"
+    # link to a shipped epic is the common case.
+    issues = [i for i in issues if not i.is_closed]
     if not issues or not diff_text.strip():
         return []
 

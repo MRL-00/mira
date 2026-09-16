@@ -224,9 +224,11 @@ SUBMIT_TICKET_VERIFICATION_TOOL = {
                                 "enum": ["met", "unmet", "unclear"],
                                 "description": (
                                     "met: the diff demonstrably satisfies this requirement. "
-                                    "unmet: the diff shows it was missed, done wrong, or not "
-                                    "implemented at all. unclear: the requirement cannot be "
-                                    "judged from the diff alone."
+                                    "unmet: the diff itself shows it was done wrong or "
+                                    "contradicts the requirement. unclear: the diff does not "
+                                    "prove it either way — including when the decisive code is "
+                                    "outside the diff, or the requirement is that existing "
+                                    "behaviour stays unchanged."
                                 ),
                             },
                             "evidence": {
