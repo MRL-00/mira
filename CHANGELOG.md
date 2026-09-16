@@ -4,6 +4,16 @@ All notable changes to Mira are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- **Commit-scoped GitHub checks.** Every GitHub review now creates a pending `Mira Review` check on the PR head SHA. The check succeeds when Mira finds no warnings or blockers, fails when it does, and also fails if the review cannot complete. Existing GitHub App installations must grant **Checks: read and write** for these statuses to appear; review comments continue working while that permission is being added.
+
+### Changed
+
+- **Every pushed commit is reviewed.** Pull-request synchronize events can no longer be disabled, and pushes received during an active review are queued instead of dropped. The `review.review_on_synchronize` setting and dashboard toggle have been removed. Follow-up reviews remain incremental, so they inspect only changes since Mira's last completed review.
+
 ## [0.8.0] — 2026-07-27
 
 ### Added

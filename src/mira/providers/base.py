@@ -128,6 +128,21 @@ class BaseProvider(abc.ABC):
         """Fetch a single comment/note body by id (best-effort, "" on failure)."""
         return ""
 
+    async def start_review_check(self, pr_info: PRInfo) -> int | None:
+        """Start a commit-scoped review check when the platform supports it."""
+        return None
+
+    async def complete_review_check(
+        self,
+        pr_info: PRInfo,
+        check_id: int,
+        conclusion: str,
+        title: str,
+        summary: str,
+    ) -> None:
+        """Complete a review check started by :meth:`start_review_check`."""
+        return
+
     async def get_discussion_root_body(self, pr_info: PRInfo, discussion_id: str) -> str:
         """The first comment of a thread/discussion (best-effort, "" on failure)."""
         return ""

@@ -194,6 +194,56 @@ class GitHubProvider(BaseProvider):
         self._github = Github(token)
         self._token = token
 
+    async def start_review_check(self, pr_info: PRInfo) -> int | None:
+        """Create an in-progress check run attached to the PR's current head."""
+        if not pr_info.head_sha:
+            return None
+
+        @_retry_transient
+        def _start() -> int:
+            repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            check = repo.create_check_run(
+                name="Mira Review",
+                head_sha=pr_info.head_sha,
+                status="in_progress",
+                details_url=pr_info.url,
+            )
+            return check.id
+
+        try:
+            return await asyncio.to_thread(_start)
+        except Exception as exc:
+            # Checks require a separate GitHub App permission. Keep reviews
+            # working while an existing installation is being upgraded.
+            logger.warning("Failed to start GitHub review check: %s", exc)
+            return None
+
+    async def complete_review_check(
+        self,
+        pr_info: PRInfo,
+        check_id: int,
+        conclusion: str,
+        title: str,
+        summary: str,
+    ) -> None:
+        """Complete a check run without allowing check failures to lose review output."""
+
+        @_retry_transient
+        def _complete() -> None:
+            repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            check = repo.get_check_run(check_id)
+            check.edit(
+                status="completed",
+                conclusion=conclusion,
+                details_url=pr_info.url,
+                output={"title": title, "summary": summary},
+            )
+
+        try:
+            await asyncio.to_thread(_complete)
+        except Exception as exc:
+            logger.warning("Failed to complete GitHub review check %s: %s", check_id, exc)
+
     async def get_pr_info(self, pr_url: str) -> PRInfo:
         owner, repo, number = parse_pr_url(pr_url)
 

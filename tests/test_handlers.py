@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mira.core.review_status import tracker as review_tracker
 from mira.models import PRInfo, ReviewComment, ReviewResult, Severity
 from mira.platforms.github.webhook import (
     handle_comment,
@@ -15,7 +16,7 @@ from mira.platforms.github.webhook import (
     handle_pull_request,
     handle_thread_reject,
 )
-from mira.platforms.handlers import _REJECT_KEYWORDS
+from mira.platforms.handlers import _REJECT_KEYWORDS, run_pr_review
 
 
 def _make_pr_payload() -> dict[str, Any]:
@@ -44,6 +45,24 @@ def _make_comment_payload(body: str) -> dict[str, Any]:
             "name": "testrepo",
         },
     }
+
+
+def _mock_review_provider(mock_provider_cls: MagicMock) -> AsyncMock:
+    provider = AsyncMock()
+    provider.get_pr_info.return_value = PRInfo(
+        title="Test PR",
+        description="A test PR",
+        base_branch="main",
+        head_branch="feature",
+        url="https://github.com/testowner/testrepo/pull/42",
+        number=42,
+        owner="testowner",
+        repo="testrepo",
+        head_sha="abc123",
+    )
+    provider.start_review_check.return_value = 101
+    mock_provider_cls.return_value = provider
+    return provider
 
 
 @pytest.fixture
@@ -81,6 +100,7 @@ async def test_handle_pr_event(
 ) -> None:
     """PR event creates engine and calls review_pr."""
     mock_config.return_value = MagicMock()
+    provider = _mock_review_provider(mock_provider_cls)
     mock_engine = AsyncMock()
     mock_engine.review_pr = AsyncMock(return_value=ReviewResult(summary="ok"))
     mock_engine_cls.return_value = mock_engine
@@ -90,6 +110,8 @@ async def test_handle_pr_event(
     mock_app_auth.get_installation_token.assert_awaited_once_with(1)
     mock_provider_cls.assert_called_once_with("github", "ghs_test_token")
     mock_engine.review_pr.assert_awaited_once_with("https://github.com/testowner/testrepo/pull/42")
+    provider.complete_review_check.assert_awaited_once()
+    assert provider.complete_review_check.await_args.args[2] == "success"
 
 
 # ── Outbound webhook dispatch wiring ─────────────────────────────────────────
@@ -117,6 +139,10 @@ async def _run_pr_handler(result: ReviewResult | Exception, mock_engine_cls, moc
     else:
         mock_engine.review_pr = AsyncMock(return_value=result)
     mock_engine_cls.return_value = mock_engine
+
+    from mira.platforms.github import webhook
+
+    provider = _mock_review_provider(webhook.create_provider)
 
     with (
         patch("mira.dashboard.api._app_db") as mock_db,
@@ -166,6 +192,10 @@ async def test_completed_review_fires_review_completed(
     assert data["comments"] == 1
     assert data["key_issues"] == 0
 
+    provider = mock_provider_cls.return_value
+    provider.complete_review_check.assert_awaited_once()
+    assert provider.complete_review_check.await_args.args[2] == "success"
+
 
 @patch("mira.platforms.handlers.ReviewEngine")
 @patch("mira.platforms.github.webhook.create_provider")
@@ -191,6 +221,10 @@ async def test_blocker_comment_also_fires_high_severity(
     assert "review.completed" in events
     assert "review.high_severity" in events
 
+    provider = mock_provider_cls.return_value
+    provider.complete_review_check.assert_awaited_once()
+    assert provider.complete_review_check.await_args.args[2] == "failure"
+
 
 @patch("mira.platforms.handlers.ReviewEngine")
 @patch("mira.platforms.github.webhook.create_provider")
@@ -214,6 +248,62 @@ async def test_failed_review_fires_review_failed(
     data = _data_for(mock_dispatch, "review.failed")
     assert data["repo"] == "testowner/testrepo"
     assert "boom" in data["error"]
+
+    provider = mock_provider_cls.return_value
+    provider.complete_review_check.assert_awaited_once()
+    assert provider.complete_review_check.await_args.args[2] == "failure"
+
+
+async def test_push_during_active_review_is_queued_not_dropped() -> None:
+    provider = AsyncMock()
+    provider.get_pr_info.return_value = PRInfo(
+        title="Test PR",
+        description="",
+        base_branch="main",
+        head_branch="feature",
+        url="https://github.com/testowner/testrepo/pull/42",
+        number=42,
+        owner="testowner",
+        repo="testrepo",
+        head_sha="new-head",
+    )
+    provider.start_review_check.return_value = None
+    engine = AsyncMock()
+    expected = ReviewResult(summary="reviewed latest head")
+    engine.review_pr.return_value = expected
+
+    review_tracker.start(
+        "testowner/testrepo",
+        42,
+        "Earlier review",
+        "https://github.com/testowner/testrepo/pull/42",
+    )
+
+    async def finish_active_review(_delay: float) -> None:
+        review_tracker.complete("testowner/testrepo", 42)
+
+    with (
+        patch("mira.platforms.handlers.asyncio.sleep", side_effect=finish_active_review) as sleep,
+        patch("mira.platforms.handlers.load_config", return_value=MagicMock()),
+        patch("mira.platforms.handlers.create_llm"),
+        patch("mira.platforms.handlers.ReviewEngine", return_value=engine),
+        patch("mira.dashboard.api._app_db") as db,
+        patch("mira.outbound_webhooks.dispatch_event", new_callable=AsyncMock),
+    ):
+        db.get_repo.return_value = MagicMock(status="ready")
+        result = await run_pr_review(
+            provider,
+            "testowner",
+            "testrepo",
+            42,
+            "https://github.com/testowner/testrepo/pull/42",
+            False,
+            "mira-bot",
+        )
+
+    sleep.assert_awaited_once_with(0.25)
+    engine.review_pr.assert_awaited_once()
+    assert result is expected
 
 
 @patch("mira.platforms.handlers.ReviewEngine")

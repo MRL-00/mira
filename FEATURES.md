@@ -50,7 +50,7 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 
 ## Platform integrations
 
-- GitHub App with webhook support — works against github.com and GitHub Enterprise Server (set `MIRA_GITHUB_API_URL`)
+- GitHub App with webhook support and commit-scoped pass/fail checks — works against github.com and GitHub Enterprise Server (set `MIRA_GITHUB_API_URL`)
 - GitLab with full feature parity — merge-request reviews, `@mention` commands, thread auto-resolution, indexing — via a group or project access token (`MIRA_GITLAB_TOKEN`); self-managed instances via `MIRA_GITLAB_API_URL`
 - Forgejo / Codeberg — pull-request reviews and `@mention` commands via an access token (`MIRA_FORGEJO_TOKEN`); self-hosted instances via `MIRA_FORGEJO_API_URL`
 - One `mira serve` deployment reviews on any combination of platforms, each on its own webhook route
