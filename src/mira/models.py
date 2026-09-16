@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 WALKTHROUGH_MARKER = "<!-- mira-walkthrough -->"
 
@@ -247,10 +248,14 @@ def derive_verdict(
 ) -> Verdict:
     """Derive a merge verdict from the findings that survived filtering.
 
-    Blockers — including any unmet linked-ticket requirement — force "Request
-    changes"; warnings (or a low confidence score) give "Needs review";
-    anything else is safe to merge. Each bucket keeps the comments themselves
-    so callers can list exactly what has to change.
+    Blockers force "Request changes"; warnings, a low confidence score, or an
+    unmet linked-ticket requirement give "Needs review"; anything else is safe
+    to merge. Each bucket keeps the comments themselves so callers can list
+    exactly what has to change.
+
+    Ticket grading is advisory on purpose: the grader only sees the diff, so an
+    "unmet" it reports is a prompt for the human reviewer to check, not proof
+    the work is missing. Only code findings block the merge.
     """
     filed = comments or []
     blockers = [c for c in filed if c.severity == Severity.BLOCKER]
@@ -258,9 +263,9 @@ def derive_verdict(
     optional = [c for c in filed if c.severity <= Severity.SUGGESTION]
     unmet = [c for c in (criteria or []) if c.is_unmet]
 
-    if blockers or unmet:
+    if blockers:
         label, emoji = VERDICT_REQUEST_CHANGES, "\U0001f6d1"
-    elif warnings or (confidence_score is not None and confidence_score.score <= 2):
+    elif warnings or unmet or (confidence_score is not None and confidence_score.score <= 2):
         label, emoji = VERDICT_NEEDS_REVIEW, "\u26a0\ufe0f"
     else:
         label, emoji = VERDICT_APPROVE, "\u2705"
@@ -339,7 +344,8 @@ def linear_ticket_status(result: ReviewResult) -> tuple[str, bool]:
     if unmet:
         count = len(unmet)
         return (
-            f"No — {linked}; {count} acceptance criterion{'s' if count != 1 else ''} unmet",
+            f"Check — {linked}; {count} acceptance criterion{'s' if count != 1 else ''} "
+            "not confirmed by the diff",
             False,
         )
     # This row grades the ticket, not the code: code findings are the verdict's
@@ -367,6 +373,10 @@ class LinkedIssue:
     title: str = ""
     url: str = ""
     state: str = ""
+    # Linear workflow-state category: "backlog" | "unstarted" | "started" |
+    # "completed" | "canceled" | "triage". Stable across teams' custom state
+    # names, so it decides whether the ticket is still being worked on.
+    state_type: str = ""
     description: str = ""
     source: str = "linear"
     # Explicit acceptance criteria parsed from the ticket (markdown checkboxes
@@ -379,6 +389,11 @@ class LinkedIssue:
     comments: list[str] = field(default_factory=list)
     children: list[str] = field(default_factory=list)
 
+    @property
+    def is_closed(self) -> bool:
+        """Already shipped or dropped — its requirements are not this PR's job."""
+        return self.state_type in {"completed", "canceled"}
+
 
 @dataclass
 class TicketCriterion:
@@ -386,7 +401,8 @@ class TicketCriterion:
 
     issue: str
     criterion: str
-    # "met" | "unmet" | "unclear" — unmet forces a "Request changes" verdict.
+    # "met" | "unmet" | "unclear" — unmet is advisory: it downgrades the verdict
+    # to "Needs review" and is listed for the human reviewer to check.
     status: str = "unclear"
     evidence: str = ""
 
@@ -450,6 +466,8 @@ class WalkthroughResult:
         verdict_note: str = "",
         status_rows: list[tuple[str, str]] | None = None,
         outstanding_count: int = 0,
+        reviewed_sha: str = "",
+        reviewed_at: datetime | None = None,
     ) -> str:
         """Render as a markdown PR comment."""
         parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
@@ -636,6 +654,16 @@ class WalkthroughResult:
 
         parts.append("")
         parts.append("---")
+        # The walkthrough is edited in place on every pass, so a re-review that
+        # reaches the same verdict looks identical to "nothing happened". Stamp
+        # what was reviewed and when so the reader can tell.
+        if not in_progress and (reviewed_sha or reviewed_at):
+            stamp = "> Last reviewed"
+            if reviewed_sha:
+                stamp += f" `{reviewed_sha[:7]}`"
+            if reviewed_at:
+                stamp += f" at {reviewed_at.astimezone(UTC).strftime('%Y-%m-%d %H:%M UTC')}"
+            parts.append(stamp + ".")
         parts.append(
             f"> Comment `@{bot_name} help` to get the list of available commands and usage tips."
         )
@@ -729,7 +757,10 @@ class WalkthroughResult:
             lines.extend(_format_finding_lines(verdict.blockers))
             lines.append("")
         if verdict.unmet_criteria:
-            lines.append("**Ticket requirements not met:**")
+            lines.append(
+                "**Ticket requirements to check** — Mira could not confirm these from the "
+                "diff; please verify before merging:"
+            )
             lines.append("")
             for c in verdict.unmet_criteria:
                 line = f"- `{c.issue}` — {c.criterion}"
@@ -903,8 +934,8 @@ class ReviewResult:
     # Line counts across the files actually reviewed, for the walkthrough header.
     additions: int = 0
     deletions: int = 0
-    # Linked-ticket requirements graded against the diff. Any unmet criterion
-    # forces a "Request changes" verdict.
+    # Linked-ticket requirements graded against the diff. An unmet criterion
+    # downgrades the verdict to "Needs review" (advisory, never blocking).
     ticket_criteria: list[TicketCriterion] = field(default_factory=list)
     # Surfaced in the walkthrough banner so @miracodeai review-rest can target the rest.
     reviewed_paths: list[str] = field(default_factory=list)

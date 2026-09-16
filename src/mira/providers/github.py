@@ -114,8 +114,9 @@ def _checks_status(commit: Any) -> str:
 
 
 # Maps Mira's verdict to a GitHub check-run conclusion. "Request changes"
-# (blockers or unmet ticket criteria) fails the check so branch protection can
-# require it; "Needs review" is neutral; a clean review passes.
+# (code blockers) fails the check so branch protection can require it; "Needs
+# review" (warnings, or ticket criteria Mira could not confirm) is neutral; a
+# clean review passes.
 _CHECK_CONCLUSION: dict[str, str] = {
     VERDICT_REQUEST_CHANGES: "failure",
     VERDICT_NEEDS_REVIEW: "neutral",
@@ -146,7 +147,9 @@ def _check_summary(result: ReviewResult, verdict_label: str) -> str:
     if warnings:
         stats.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
     if unmet:
-        stats.append(f"{unmet} unmet ticket requirement{'s' if unmet != 1 else ''}")
+        stats.append(
+            f"{unmet} ticket requirement{'s' if unmet != 1 else ''} to check against the ticket"
+        )
     if stats:
         lines.append(", ".join(stats).capitalize() + ".")
     if result.summary:
@@ -191,11 +194,6 @@ def _blocking_summary(result: ReviewResult) -> str:
     A blocking review needs *some* body (it has no inline comments to carry the
     message) and must still name what has to change.
     """
-    unmet = [c for c in result.ticket_criteria if c.is_unmet]
-    if unmet:
-        criteria = "; ".join(f"`{c.issue}` — {c.criterion}" for c in unmet[:3])
-        extra = f" (+{len(unmet) - 3} more)" if len(unmet) > 3 else ""
-        return f"**Request changes** — ticket requirements not met: {criteria}{extra}"
     blockers = [
         c
         for c in [*result.comments, *result.outstanding_comments]
@@ -888,6 +886,32 @@ class GitHubProvider(BaseProvider):
             return await asyncio.to_thread(_fetch)
         except Exception:
             return ""
+
+    async def get_comment_author(self, pr_info: PRInfo, comment_id: int) -> str:
+        """Login of a review (line) comment's author. Best-effort."""
+
+        def _fetch() -> str:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            pr = gh_repo.get_pull(pr_info.number)
+            user = pr.get_review_comment(comment_id).user
+            return (user.login or "") if user else ""
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception:
+            return ""
+
+    async def react_to_comment(self, pr_info: PRInfo, comment_id: int, reaction: str) -> None:
+        """Add an emoji reaction (e.g. "eyes", "rocket") to an issue comment. Best-effort."""
+
+        def _react() -> None:
+            gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
+            gh_repo.get_issue(pr_info.number).get_comment(comment_id).create_reaction(reaction)
+
+        try:
+            await asyncio.to_thread(_react)
+        except Exception as exc:  # noqa: BLE001 — a reaction must never break a command
+            logger.debug("Failed to react to comment %s: %s", comment_id, exc)
 
     @retry(
         stop=stop_after_attempt(3),

@@ -124,6 +124,13 @@ def get_security_model(
     return get_review_model(config, db_review_model)
 
 
+def get_ticket_model(config: LLMConfig, db_review_model: str | None = None) -> str:
+    """Resolve the ticket-grading model: config.ticket_model → review tier."""
+    if config.ticket_model:
+        return config.ticket_model
+    return get_review_model(config, db_review_model)
+
+
 def get_review_thinking_mode(config: LLMConfig, db_value: str | None = None) -> str | None:
     """Resolve the review thinking mode: DB → config.review_reasoning_effort → None.
 
@@ -162,6 +169,8 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
                 db_model = _app_db.get_setting("security_model")
                 db_thinking = _app_db.get_setting("review_thinking_mode")
                 db_review = _app_db.get_setting("review_model")
+            elif purpose == "ticket":
+                db_review = _app_db.get_setting("review_model")
             db_style = _app_db.get_setting("api_style")
     except Exception:
         pass  # DB not available — resolve from config fields alone
@@ -180,6 +189,11 @@ def llm_config_for(purpose: str, base: LLMConfig) -> LLMConfig:
         resolved = get_review_model(base, db_model)
         config_model = base.review_model
         thinking_mode = get_review_thinking_mode(base, db_thinking)
+    elif purpose == "ticket":
+        resolved = get_ticket_model(base, db_review)
+        config_model = base.ticket_model
+        effort = base.ticket_reasoning_effort
+        thinking_mode = effort if effort and effort != "off" else None
     else:
         return base.model_copy(update={"reasoning_effort": None, "api_style": resolved_style})
 

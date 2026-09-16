@@ -92,3 +92,40 @@ class TestLlmConfigForSecurity:
             config = llm_config_for("security", base)
 
         assert config.reasoning_effort == "medium"
+
+
+class TestLlmConfigForTicket:
+    """llm_config_for("ticket", base) resolves the ticket-grading tier."""
+
+    def test_uses_ticket_model_and_its_own_effort(self):
+        base = LLMConfig(
+            model="base",
+            review_model="review",
+            ticket_model="anthropic/claude-sonnet-4-6",
+            ticket_reasoning_effort="medium",
+            review_reasoning_effort="off",
+        )
+        with patch("mira.dashboard.models_config._app_db", None, create=True):
+            config = llm_config_for("ticket", base)
+
+        assert config.model == "anthropic/claude-sonnet-4-6"
+        assert config.reasoning_effort == "medium"
+
+    def test_falls_back_to_review_model_with_no_reasoning(self):
+        base = LLMConfig(model="base", review_model="review")
+        with patch("mira.dashboard.models_config._app_db", None, create=True):
+            config = llm_config_for("ticket", base)
+
+        assert config.model == "review"
+        assert config.reasoning_effort is None
+
+    def test_falls_back_to_db_review_model(self):
+        class _FakeDB:
+            def get_setting(self, key: str) -> str | None:
+                return {"review_model": "db-review"}.get(key)
+
+        base = LLMConfig(model="base")
+        with patch("mira.dashboard.api._app_db", _FakeDB()):
+            config = llm_config_for("ticket", base)
+
+        assert config.model == "db-review"

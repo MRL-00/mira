@@ -157,6 +157,18 @@ class BaseProvider(abc.ABC):
         """Fetch a single comment/note body by id (best-effort, "" on failure)."""
         return ""
 
+    async def get_comment_author(self, pr_info: PRInfo, comment_id: int) -> str:
+        """Login of a review (line) comment's author (best-effort, "" on failure)."""
+        return ""
+
+    async def react_to_comment(self, pr_info: PRInfo, comment_id: int, reaction: str) -> None:
+        """Acknowledge a PR-level comment with an emoji reaction (best-effort).
+
+        Used so a ``@bot review`` command visibly gets picked up even when the
+        resulting walkthrough is edited in place and looks unchanged.
+        """
+        return
+
     async def get_discussion_root_body(self, pr_info: PRInfo, discussion_id: str) -> str:
         """The first comment of a thread/discussion (best-effort, "" on failure)."""
         return ""

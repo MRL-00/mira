@@ -596,7 +596,7 @@ class TestReviewEngine:
     async def test_unmet_ticket_criterion_requests_changes(
         self, mock_llm: LLMProvider, mock_provider: AsyncMock, monkeypatch: pytest.MonkeyPatch
     ):
-        """A missed linked-ticket requirement shows up and blocks the PR."""
+        """A missed linked-ticket requirement is shown, but does not block the PR."""
         monkeypatch.setattr(
             "mira.core.engine.resolve_linked_issues",
             AsyncMock(
@@ -628,14 +628,53 @@ class TestReviewEngine:
         await engine.review_pr("https://github.com/test/repo/pull/1")
 
         mock_provider.post_review.assert_called_once()
+        # The sample review files a code blocker, so the verdict still blocks —
+        # but because of that blocker, not the ticket grade.
         assert mock_provider.post_review.call_args.kwargs["request_changes"] is True
+        assert mock_provider.post_check_run.await_args.args[2] == "Request changes"
 
         bodies = [call.args[1] for call in mock_provider.post_comment.call_args_list]
         bodies += [call.args[2] for call in mock_provider.update_comment.call_args_list]
         final = "\n".join(bodies)
         assert "### Ticket acceptance criteria" in final
         assert "\u274c Retries are capped" in final
-        assert "Ticket requirements not met:" in final
+        assert "Ticket requirements to check" in final
+        assert "**Blockers — must fix before merge:**" in final
+
+    @pytest.mark.asyncio
+    async def test_unmet_ticket_criterion_alone_does_not_block(
+        self, mock_llm: LLMProvider, mock_provider: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ):
+        """With no code findings, an unmet ticket criterion is advisory only."""
+        mock_llm.review = AsyncMock(return_value=json.dumps({"comments": []}))
+        monkeypatch.setattr(
+            "mira.core.engine.resolve_linked_issues",
+            AsyncMock(
+                return_value=LinearLookup(
+                    status="loaded",
+                    identifiers=["ENG-1"],
+                    issues=[LinkedIssue(identifier="ENG-1", criteria=["Retries are capped"])],
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "mira.core.engine.verify_ticket_criteria",
+            AsyncMock(return_value=[TicketCriterion("ENG-1", "Retries are capped", "unmet")]),
+        )
+
+        engine = ReviewEngine(config=MiraConfig(), llm=mock_llm, provider=mock_provider)
+        await engine.review_pr("https://github.com/test/repo/pull/1")
+
+        assert mock_provider.post_check_run.await_args.args[2] == "Needs review"
+        if mock_provider.post_review.await_count:
+            assert mock_provider.post_review.call_args.kwargs["request_changes"] is False
+
+        bodies = [call.args[1] for call in mock_provider.post_comment.call_args_list]
+        bodies += [call.args[2] for call in mock_provider.update_comment.call_args_list]
+        final = "\n".join(bodies)
+        assert "## Verdict: \u26a0\ufe0f Needs review" in final
+        assert "Ticket requirements to check" in final
+        assert "Request changes" not in final
 
     def _comment(self, severity: Severity) -> ReviewComment:
         return ReviewComment(

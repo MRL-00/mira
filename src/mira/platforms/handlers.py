@@ -4,6 +4,7 @@ none is tied to a specific platform's payload shape."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -106,6 +107,7 @@ async def run_pr_review(
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
     security_llm = create_llm(llm_config_for("security", config.llm))
+    ticket_llm = create_llm(llm_config_for("ticket", config.llm))
     engine = ReviewEngine(
         config=config,
         llm=llm,
@@ -113,6 +115,7 @@ async def run_pr_review(
         bot_name=bot_name,
         indexing_llm=indexing_llm,
         security_llm=security_llm,
+        ticket_llm=ticket_llm,
     )
 
     from mira.dashboard.api import _app_db
@@ -162,6 +165,34 @@ async def run_pr_review(
         await dispatch_event(REVIEW_HIGH_SEVERITY, event_data)
 
 
+async def _react(
+    provider: Any,
+    pr_url: str,
+    number: int,
+    owner: str,
+    repo: str,
+    comment_id: int | None,
+    reaction: str,
+) -> None:
+    """React to the command comment, if the platform gave us one. Best-effort."""
+    if comment_id is None:
+        return
+    from mira.models import PRInfo
+
+    pr_info = PRInfo(
+        title="",
+        description="",
+        base_branch="",
+        head_branch="",
+        url=pr_url,
+        number=number,
+        owner=owner,
+        repo=repo,
+    )
+    with contextlib.suppress(Exception):
+        await provider.react_to_comment(pr_info, comment_id, reaction)
+
+
 async def run_pr_command(
     provider: Any,
     owner: str,
@@ -173,11 +204,16 @@ async def run_pr_command(
     bot_name: str,
     platform: str = "github",
     pr_title: str = "",
+    command_comment_id: int | None = None,
 ) -> None:
     """Platform-neutral handler for an @-mention command on a PR/MR.
 
     Dispatches help / review / review-rest / free-form Q&A through the provider
     and engine. Shared by the GitHub and GitLab comment handlers.
+
+    ``command_comment_id`` is the comment that issued the command; when given,
+    the bot reacts to it (👀 on pickup, 🚀 on completion, 😕 on failure) so a
+    re-review that edits the walkthrough in place still visibly happened.
     """
     repo_full = f"{owner}/{repo}"
     config = load_config()
@@ -186,6 +222,7 @@ async def run_pr_command(
     llm = create_llm(llm_config_for("review", config.llm))
     indexing_llm = create_llm(llm_config_for("indexing", config.llm))
     security_llm = create_llm(llm_config_for("security", config.llm))
+    ticket_llm = create_llm(llm_config_for("ticket", config.llm))
 
     normalized = question.lower().strip()
     is_review = normalized in _REVIEW_KEYWORDS
@@ -217,6 +254,7 @@ async def run_pr_command(
             bot_name=bot_name,
             indexing_llm=indexing_llm,
             security_llm=security_llm,
+            ticket_llm=ticket_llm,
         )
         engine._review_only_paths = set(progress.skipped_paths)  # type: ignore[attr-defined]
         if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
@@ -239,17 +277,22 @@ async def run_pr_command(
             bot_name=bot_name,
             indexing_llm=indexing_llm,
             security_llm=security_llm,
+            ticket_llm=ticket_llm,
         )
         if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
             logger.info("Review already in progress for %s, skipping", pr_url)
+            await _react(provider, pr_url, number, owner, repo, command_comment_id, "confused")
             return
         logger.info("Re-review triggered for %s by @%s", pr_url, actor)
+        await _react(provider, pr_url, number, owner, repo, command_comment_id, "eyes")
         try:
             await engine.review_pr(pr_url)
             review_tracker.complete(repo_full, number)
         except Exception as exc:
             review_tracker.fail(repo_full, number, str(exc))
+            await _react(provider, pr_url, number, owner, repo, command_comment_id, "confused")
             raise
+        await _react(provider, pr_url, number, owner, repo, command_comment_id, "rocket")
     else:
         pr_info = await provider.get_pr_info(pr_url)
         diff_text = await provider.get_pr_diff(pr_info)

@@ -735,16 +735,37 @@ class TestWalkthroughToMarkdown:
         assert "\u274c Failures surface — not handled" in md
         assert "\u26a0\ufe0f Metrics emitted" in md
 
-    def test_unmet_criterion_forces_request_changes(self):
+    def test_unmet_criterion_is_advisory_needs_review(self):
+        """Ticket grading is a prompt for the human, never a blocking verdict."""
         from mira.models import TicketCriterion
 
         result = WalkthroughResult(summary="Changes.")
         md = result.to_markdown(
             ticket_criteria=[TicketCriterion("ENG-482", "Failures surface", "unmet")]
         )
-        assert "## Verdict: \U0001f6d1 Request changes" in md
-        assert "**Ticket requirements not met:**" in md
+        assert "## Verdict: \u26a0\ufe0f Needs review" in md
+        assert "Request changes" not in md
+        assert "**Ticket requirements to check**" in md
         assert "`ENG-482` — Failures surface" in md
+
+    def test_footer_stamps_reviewed_sha_and_time(self):
+        from datetime import UTC, datetime
+
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            reviewed_sha="abcdef1234567",
+            reviewed_at=datetime(2026, 9, 15, 23, 0, 35, tzinfo=UTC),
+        )
+        assert "> Last reviewed `abcdef1` at 2026-09-15 23:00 UTC." in md
+
+    def test_footer_stamp_hidden_while_in_progress(self):
+        from datetime import UTC, datetime
+
+        result = WalkthroughResult(summary="Changes.")
+        md = result.to_markdown(
+            in_progress=True, reviewed_sha="abcdef1234567", reviewed_at=datetime.now(UTC)
+        )
+        assert "Last reviewed" not in md
 
     def test_met_criteria_do_not_change_verdict(self):
         from mira.models import TicketCriterion
@@ -822,11 +843,13 @@ class TestDeriveReviewVerdict:
     def test_clean_review_approves(self):
         assert derive_review_verdict(ReviewResult(summary="ok")).label == "Looks good to merge"
 
-    def test_unmet_criterion_requests_changes(self):
+    def test_unmet_criterion_needs_review_not_request_changes(self):
         result = ReviewResult(
             ticket_criteria=[TicketCriterion("EPIC-1", "Do the thing", "unmet", "missing")]
         )
-        assert derive_review_verdict(result).label == "Request changes"
+        verdict = derive_review_verdict(result)
+        assert verdict.label == "Needs review"
+        assert verdict.unmet_criteria and verdict.unmet_criteria[0].issue == "EPIC-1"
 
     def test_unverified_ticket_downgrades_approval(self):
         result = ReviewResult(
@@ -933,12 +956,12 @@ class TestLinearTicketStatusRow:
         assert "1 of 2 criteria met" in value
         assert "1 unclear from the diff" in value
 
-    def test_unmet_ticket_is_a_no(self):
+    def test_unmet_ticket_asks_the_reviewer_to_check(self):
         value, verified = linear_ticket_status(
             self._result([TicketCriterion("EPIC-1113", "A", "unmet", "missing")])
         )
-        assert value.startswith("No —")
-        assert "1 acceptance criterion unmet" in value
+        assert value.startswith("Check —")
+        assert "1 acceptance criterion not confirmed by the diff" in value
         assert verified is False
 
     def test_code_findings_do_not_change_the_ticket_row(self):

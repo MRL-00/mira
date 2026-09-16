@@ -553,6 +553,13 @@ async def dispatch_github_event(
         if has_mention(rc_body, names):
             background_tasks.add_task(handle_thread_reject, payload, app_auth, bot_name)
             return "processing"
+        # A reply inside an existing thread, with no @-mention. Developers
+        # answer Mira's inline comments this way far more often than they tag
+        # it, so hand it to the reply handler — which checks whether the thread
+        # root is Mira's before doing anything.
+        if payload.get("comment", {}).get("in_reply_to_id"):
+            background_tasks.add_task(handle_thread_reply_unmentioned, payload, app_auth, bot_name)
+            return "processing"
 
     if event == "installation" and action == "created":
         background_tasks.add_task(handle_installation, payload, app_auth, bot_name)
@@ -659,9 +666,59 @@ async def handle_comment(
             comment_user,
             bot_name,
             pr_title=payload["issue"].get("title", ""),
+            command_comment_id=payload["comment"].get("id"),
         )
     except Exception:
         logger.exception("Error handling comment event")
+
+
+async def handle_thread_reply_unmentioned(
+    payload: dict[str, Any],
+    app_auth: GitHubAppAuth,
+    bot_name: str,
+) -> None:
+    """A reply in a review thread that did not @-mention the bot.
+
+    Answers it exactly like a mentioned reply, but only when the thread was
+    started by Mira; replies in human-to-human threads are left alone.
+    """
+    installation_id: int = payload.get("installation", {}).get("id", 0)
+    try:
+        in_reply_to_id: int | None = payload["comment"].get("in_reply_to_id")
+        if not in_reply_to_id:
+            return
+        token = await app_auth.get_installation_token(installation_id)
+        provider = create_provider("github", token)
+        owner = payload["repository"]["owner"]["login"]
+        repo = payload["repository"]["name"]
+        number = payload["pull_request"]["number"]
+        pr_info = PRInfo(
+            title="",
+            description="",
+            base_branch="",
+            head_branch="",
+            url=f"https://github.com/{owner}/{repo}/pull/{number}",
+            number=number,
+            owner=owner,
+            repo=repo,
+        )
+        root_author = await provider.get_comment_author(pr_info, in_reply_to_id)
+        bot_logins = {
+            n.removesuffix("[bot]").lower()
+            for n in mention_names(bot_name, await app_auth.get_bot_identity())
+        }
+        if root_author.removesuffix("[bot]").lower() not in bot_logins:
+            logger.debug(
+                "Ignoring unmentioned reply on %s/%s#%d — thread root by %s, not the bot",
+                owner,
+                repo,
+                number,
+                root_author or "?",
+            )
+            return
+        await _handle_thread_freeform_reply(payload, app_auth, bot_name)
+    except Exception:
+        logger.exception("Error handling unmentioned thread reply")
 
 
 async def handle_thread_reject(
