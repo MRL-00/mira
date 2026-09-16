@@ -163,8 +163,9 @@ SUBMIT_THREAD_REPLY_TOOL = {
     "function": {
         "name": "submit_thread_reply",
         "description": (
-            "Reply to a human's comment on one of your previous PR review "
-            "suggestions. Classify their intent and write a short reply."
+            "Reply to a developer's comment on one of your inline PR review "
+            "comments, after checking the code. Classify their intent and write "
+            "a short, specific reply."
         ),
         "parameters": {
             "type": "object",
@@ -173,18 +174,27 @@ SUBMIT_THREAD_REPLY_TOOL = {
                     "type": "string",
                     "enum": ["disagreement", "question", "agreement", "other"],
                     "description": (
-                        "disagreement = human refutes the suggestion / says it doesn't apply. "
-                        "question = human is asking for clarification. "
-                        "agreement = human is acknowledging or thanking. "
+                        "disagreement = developer says the comment was wrong / doesn't apply. "
+                        "question = developer asks why it matters or how to fix it. "
+                        "agreement = developer acknowledges or thanks. "
                         "other = anything else (off-topic, unclear)."
+                    ),
+                },
+                "verified": {
+                    "type": ["boolean", "null"],
+                    "description": (
+                        "For disagreement only: true when the code confirms the "
+                        "developer's point (the thread should be resolved); false when "
+                        "the code does not support it and the concern stands. Null for "
+                        "other intents."
                     ),
                 },
                 "reply": {
                     "type": "string",
                     "description": (
-                        "Your reply, 1-2 short sentences, plain text, no markdown. "
-                        'No emojis, no apologies, no "as an AI". For disagreement, '
-                        "concede gracefully. For questions, answer directly."
+                        "Your reply, 2-4 sentences, GitHub markdown allowed (backticks, "
+                        'path:line). No emojis, no apologies, no "as an AI". Cite the '
+                        "code you checked."
                     ),
                 },
             },

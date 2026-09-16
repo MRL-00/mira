@@ -45,6 +45,11 @@ _THREAD_REPLY_TEMPLATE = _THREAD_REPLY_ENV.get_template("thread_reply.jinja2")
 
 PAUSE_LABEL = "mira-paused"
 
+# Thread replies: how many read/grep hops the model gets before it must answer,
+# and how much of the file's diff is inlined into the prompt.
+_THREAD_REPLY_MAX_HOPS = 5
+_THREAD_REPLY_DIFF_CHARS = 12_000
+
 _PAUSE_KEYWORDS = {"pause"}
 
 _RESUME_KEYWORDS = {"resume"}
@@ -307,6 +312,75 @@ async def run_pr_command(
         logger.info("Replied to comment on %s", pr_url)
 
 
+def _file_diff_for(diff_text: str, path: str) -> str:
+    """The hunks touching ``path`` in the PR diff, or "" when it is not in the diff."""
+    if not diff_text or not path:
+        return ""
+    try:
+        from mira.core.diff_parser import parse_diff
+
+        for f in parse_diff(diff_text).files:
+            if f.path == path:
+                return "\n".join(h.content for h in f.hunks)[:_THREAD_REPLY_DIFF_CHARS]
+    except Exception as exc:  # noqa: BLE001 — context only; never block the reply
+        logger.debug("Could not extract file diff for %s: %s", path, exc)
+    return ""
+
+
+async def _thread_reply_tools(provider: Any, pr_info: Any) -> object | None:
+    """An agentic tool executor over the PR head, or None if the repo can't be read."""
+    ref = getattr(pr_info, "head_sha", "") or getattr(pr_info, "head_branch", "")
+    if not ref:
+        return None
+    try:
+        from mira.index.context import ProviderSourceFetcher
+        from mira.llm.agentic_tools import AgenticToolExecutor
+
+        tree: list[str] = []
+        with contextlib.suppress(Exception):
+            tree = await provider.get_repo_tree(pr_info, ref)
+        return AgenticToolExecutor(
+            source_fetcher=ProviderSourceFetcher(provider, pr_info, ref), repo_tree=tree
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Thread reply tools unavailable: %s", exc)
+        return None
+
+
+async def _thread_reply_agentic(llm: Any, prompt: str, executor: object) -> dict:
+    """Run the read/grep loop until the model calls ``submit_thread_reply``."""
+    from mira.llm.agentic_tools import AGENTIC_TOOLS
+
+    tools = [*AGENTIC_TOOLS, SUBMIT_THREAD_REPLY_TOOL]
+    convo: list[dict] = [{"role": "user", "content": prompt}]
+    for _hop in range(_THREAD_REPLY_MAX_HOPS):
+        msg = await llm.complete_agentic(convo, tools=tools)
+        tool_calls = msg.get("tool_calls") or []
+        if not tool_calls:
+            break
+        convo.append(
+            {"role": "assistant", "content": msg.get("content") or "", "tool_calls": tool_calls}
+        )
+        for call in tool_calls:
+            fn = call.get("function") or {}
+            name = fn.get("name") or ""
+            raw_args = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except Exception:
+                args = {}
+            if name == "submit_thread_reply":
+                return args if isinstance(args, dict) else {}
+            result = await executor.execute(name, args)  # type: ignore[attr-defined]
+            convo.append({"role": "tool", "tool_call_id": call.get("id") or "", "content": result})
+    # Out of hops or the model answered in prose — force the terminal call.
+    raw = await llm.complete_with_tools(
+        messages=convo, tools=[SUBMIT_THREAD_REPLY_TOOL], temperature=0.0
+    )
+    data = json.loads(strip_think_blocks(strip_code_fences(raw))) if raw else {}
+    return data if isinstance(data, dict) else {}
+
+
 async def run_thread_reply(
     provider: Any,
     pr_info: Any,
@@ -322,36 +396,69 @@ async def run_thread_reply(
     bot_name: str = "miracodeai",
     platform: str = "github",
 ) -> None:
-    """Platform-neutral free-form thread reply with intent classification.
+    """Platform-neutral, code-grounded reply to a human in a review thread.
 
-    The LLM classifies the human's message and we respond accordingly:
-    ``disagreement`` → reply + resolve the thread + record a ``rejected``
-    feedback signal (same learning signal as an explicit reject); ``question``
-    → answer, leave open; ``agreement`` / ``other`` → acknowledge, leave open.
+    The reviewer model gets the PR metadata, the diff for the file under
+    discussion, and ``read_file`` / ``grep_repo`` over the PR head, so it can
+    check the developer's claim or answer their question against the actual
+    code instead of paraphrasing its earlier comment.
+
+    ``disagreement`` verified in the code → reply + resolve the thread + record
+    a ``rejected`` feedback signal (same learning signal as an explicit reject).
+    ``disagreement`` the code does not support → reply with what was found,
+    leave the thread open. ``question`` / ``agreement`` / ``other`` → reply,
+    leave open.
     """
     config = load_config()
-    llm = create_llm(llm_config_for("indexing", config.llm))
+    llm = create_llm(llm_config_for("review", config.llm))
+
+    # Fill in the PR context the webhook payload didn't carry (title, head sha).
+    full_pr = pr_info
+    diff_text = ""
+    if not getattr(pr_info, "title", "") or not getattr(pr_info, "head_sha", ""):
+        with contextlib.suppress(Exception):
+            full_pr = await provider.get_pr_info(pr_info.url)
+    with contextlib.suppress(Exception):
+        diff_text = await provider.get_pr_diff(full_pr)
+
     prompt = _THREAD_REPLY_TEMPLATE.render(
         user_reply=human_reply or "(empty)",
         original_suggestion=original_suggestion,
+        pr_title=getattr(full_pr, "title", "") or "",
+        pr_description=(getattr(full_pr, "description", "") or "")[:1500],
+        comment_path=comment_path or "(unknown file)",
+        comment_line=comment_line,
+        file_diff=_file_diff_for(diff_text, comment_path),
     )
-    # Tool calling forces a schema-valid result — more reliable than parsing
-    # free-form JSON. The provider's tenacity decorator retries transient fails.
+
     try:
-        raw = await llm.complete_with_tools(
-            messages=[{"role": "user", "content": prompt}],
-            tools=[SUBMIT_THREAD_REPLY_TOOL],
-            temperature=0.0,
-        )
-        data = json.loads(strip_think_blocks(strip_code_fences(raw))) if raw else {}
+        executor = await _thread_reply_tools(provider, full_pr)
+        if executor is not None:
+            data = await _thread_reply_agentic(llm, prompt, executor)
+            calls = getattr(executor, "call_log", [])
+            if calls:
+                logger.info(
+                    "Thread reply on %s read %d file(s)/search(es): %s",
+                    pr_info.url,
+                    len(calls),
+                    ", ".join(f"{c['tool']}({c['arg']})" for c in calls[:6]),
+                )
+        else:
+            raw = await llm.complete_with_tools(
+                messages=[{"role": "user", "content": prompt}],
+                tools=[SUBMIT_THREAD_REPLY_TOOL],
+                temperature=0.0,
+            )
+            data = json.loads(strip_think_blocks(strip_code_fences(raw))) if raw else {}
     except Exception as exc:
-        logger.warning("Free-form thread reply LLM call failed: %s", exc)
+        logger.warning("Thread reply LLM call failed: %s", exc)
         return
 
     intent = str(data.get("intent", "other")).lower()
+    verified = data.get("verified")
     reply_text = str(data.get("reply", "")).strip()
     if not reply_text:
-        logger.warning("Free-form thread reply: empty reply (intent=%s). Skipping.", intent)
+        logger.warning("Thread reply: empty reply (intent=%s). Skipping.", intent)
         return
 
     try:
@@ -360,7 +467,10 @@ async def run_thread_reply(
         logger.warning("Failed to post thread reply: %s", exc)
         return
 
-    if intent == "disagreement":
+    # Only a disagreement the model confirmed in the code clears the thread.
+    # An unverified one (or a legacy response without the flag) stays open so
+    # a blocker can't be waved away with "that's handled elsewhere".
+    if intent == "disagreement" and verified is not False:
         try:
             tid = thread_id
             if tid is None and comment_node_id:
@@ -388,7 +498,13 @@ async def run_thread_reply(
         except Exception as fb_err:
             logger.debug("Failed to record disagreement feedback: %s", fb_err)
 
-    logger.info("Thread reply (%s) on %s: %s", intent, pr_info.url, reply_text[:80])
+    logger.info(
+        "Thread reply (%s%s) on %s: %s",
+        intent,
+        "" if verified is None else f", verified={verified}",
+        pr_info.url,
+        reply_text[:80],
+    )
 
 
 async def run_pr_merged_learning(

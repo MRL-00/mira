@@ -46,6 +46,7 @@ Mira is a self-hostable, fully open-source AI code reviewer. Everything below is
 ## Learning from feedback
 
 - `@miracodeai reject` thread resolution with feedback-event recording
+- Conversational inline threads: reply to any Mira comment (no @-mention needed on GitHub) and Mira re-reads the relevant code — diff, files, repo search — before answering; a disagreement only resolves the thread when the code confirms it
 - Deterministic rule synthesis from reject signals
 - LLM-powered synthesis of human review patterns from merged PRs (extracts recurring themes from human reviewer comments)
 - Feedback stats API for inspecting the learning loop
