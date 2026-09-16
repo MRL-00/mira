@@ -4,6 +4,7 @@ none is tied to a specific platform's payload shape."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -21,6 +22,7 @@ from mira.llm import create_llm
 from mira.llm.prompts.review import build_conversation_prompt
 from mira.llm.tool_schemas import SUBMIT_THREAD_REPLY_TOOL
 from mira.llm.utils import strip_code_fences, strip_think_blocks
+from mira.models import ReviewResult
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,7 @@ async def run_pr_review(
     bot_name: str,
     platform: str = "github",
     pr_title: str = "",
-) -> None:
+) -> ReviewResult:
     """Platform-neutral review core: review a PR/MR and post the result.
 
     Shared by the GitHub and GitLab webhook handlers — everything here goes
@@ -94,45 +96,60 @@ async def run_pr_review(
     """
     repo_full = f"{owner}/{repo}"
 
-    # Atomically claim the slot — avoids stacking redundant runs when
-    # two concurrent webhooks arrive. Returns False if already reviewing.
-    if not review_tracker.try_start(repo_full, number, pr_title, pr_url):
-        logger.info("Review already in progress for %s, skipping", pr_url)
-        return
+    pr_info = await provider.get_pr_info(pr_url)
+    check_id = await provider.start_review_check(pr_info)
 
-    config = load_config()
-    from mira.dashboard.models_config import llm_config_for
+    # Serialize reviews for one PR, but never discard a synchronize event. A
+    # push that arrives during an active review waits and then reviews the
+    # incremental diff from the last completed SHA to the latest head.
+    queued = False
+    while not review_tracker.try_start(repo_full, number, pr_title, pr_url):
+        if not queued:
+            logger.info("Review already in progress for %s; queueing latest head", pr_url)
+            queued = True
+        await asyncio.sleep(0.25)
 
-    llm = create_llm(llm_config_for("review", config.llm))
-    indexing_llm = create_llm(llm_config_for("indexing", config.llm))
-    security_llm = create_llm(llm_config_for("security", config.llm))
-    engine = ReviewEngine(
-        config=config,
-        llm=llm,
-        provider=provider,
-        bot_name=bot_name,
-        indexing_llm=indexing_llm,
-        security_llm=security_llm,
-    )
-
-    from mira.dashboard.api import _app_db
-
-    # Keep visibility current — the blast-radius filter relies on it to avoid
-    # naming private repos in a public repo's review.
     try:
-        _app_db.set_repo_visibility(owner, repo, is_private, platform=platform)
-    except sqlite3.OperationalError as exc:
-        logger.debug("set_repo_visibility failed (ignored): %s", exc)
+        config = load_config()
+        from mira.dashboard.models_config import llm_config_for
 
-    repo_record = _app_db.get_repo(owner, repo, platform=platform)
-    is_indexed = bool(repo_record and repo_record.status == "ready")
+        llm = create_llm(llm_config_for("review", config.llm))
+        indexing_llm = create_llm(llm_config_for("indexing", config.llm))
+        security_llm = create_llm(llm_config_for("security", config.llm))
+        engine = ReviewEngine(
+            config=config,
+            llm=llm,
+            provider=provider,
+            bot_name=bot_name,
+            indexing_llm=indexing_llm,
+            security_llm=security_llm,
+        )
 
-    logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
-    try:
+        from mira.dashboard.api import _app_db
+
+        # Keep visibility current — the blast-radius filter relies on it to avoid
+        # naming private repos in a public repo's review.
+        try:
+            _app_db.set_repo_visibility(owner, repo, is_private, platform=platform)
+        except sqlite3.OperationalError as exc:
+            logger.debug("set_repo_visibility failed (ignored): %s", exc)
+
+        repo_record = _app_db.get_repo(owner, repo, platform=platform)
+        is_indexed = bool(repo_record and repo_record.status == "ready")
+
+        logger.info("Reviewing %s (indexed=%s)", pr_url, is_indexed)
         result = await engine.review_pr(pr_url)
         review_tracker.complete(repo_full, number)
     except Exception as exc:
         review_tracker.fail(repo_full, number, str(exc))
+        if check_id is not None:
+            await provider.complete_review_check(
+                pr_info,
+                check_id,
+                "failure",
+                "Mira review failed",
+                "The review could not be completed. Re-run Mira before merging this commit.",
+            )
         raise
 
     # The walkthrough comment already carries the "more accurate after indexing"
@@ -149,6 +166,26 @@ async def run_pr_review(
     )
 
     stats = build_review_stats(result.comments)
+    blocking_count = sum(count for severity, count in stats.items() if severity >= Severity.WARNING)
+    if check_id is not None:
+        if blocking_count:
+            issue_label = "issue" if blocking_count == 1 else "issues"
+            await provider.complete_review_check(
+                pr_info,
+                check_id,
+                "failure",
+                "Mira found issues",
+                f"Mira found {blocking_count} warning or blocker {issue_label}. "
+                "See the PR review for details.",
+            )
+        else:
+            await provider.complete_review_check(
+                pr_info,
+                check_id,
+                "success",
+                "Mira review passed",
+                "Mira found no warnings or blockers in this commit.",
+            )
     event_data = {
         "repo": repo_full,
         "pr_url": pr_url,
@@ -160,6 +197,8 @@ async def run_pr_review(
     await dispatch_event(REVIEW_COMPLETED, event_data)
     if any(sev >= Severity.WARNING for sev in stats):
         await dispatch_event(REVIEW_HIGH_SEVERITY, event_data)
+
+    return result
 
 
 async def run_pr_command(

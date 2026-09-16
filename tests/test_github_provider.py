@@ -60,6 +60,56 @@ class TestGitHubProvider:
         with pytest.raises(ProviderError, match="token is required"):
             GitHubProvider(token="")
 
+    @pytest.mark.asyncio
+    async def test_review_check_lifecycle_targets_head_sha(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        repo = MagicMock()
+        check = MagicMock(id=321)
+        repo.create_check_run.return_value = check
+        repo.get_check_run.return_value = check
+        provider._github = MagicMock()
+        provider._github.get_repo.return_value = repo
+
+        pr_info = _make_pr_info()
+        pr_info.head_sha = "deadbeef"
+
+        check_id = await provider.start_review_check(pr_info)
+        await provider.complete_review_check(
+            pr_info,
+            check_id,
+            "success",
+            "Mira review passed",
+            "No warnings or blockers.",
+        )
+
+        assert check_id == 321
+        repo.create_check_run.assert_called_once_with(
+            name="Mira Review",
+            head_sha="deadbeef",
+            status="in_progress",
+            details_url=pr_info.url,
+        )
+        repo.get_check_run.assert_called_once_with(321)
+        check.edit.assert_called_once_with(
+            status="completed",
+            conclusion="success",
+            details_url=pr_info.url,
+            output={
+                "title": "Mira review passed",
+                "summary": "No warnings or blockers.",
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_review_continues_when_checks_permission_is_missing(self):
+        provider = GitHubProvider.__new__(GitHubProvider)
+        provider._github = MagicMock()
+        provider._github.get_repo.side_effect = PermissionError("Checks permission missing")
+        pr_info = _make_pr_info()
+        pr_info.head_sha = "deadbeef"
+
+        assert await provider.start_review_check(pr_info) is None
+
 
 def _make_pr_info() -> PRInfo:
     return PRInfo(

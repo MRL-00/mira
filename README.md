@@ -107,7 +107,9 @@ docker run -p 8000:8000 --env-file .env \
   ghcr.io/miracodeai/mira:latest --config /app/mira.yaml
 ```
 
-**2. Install the app** on your repos — every PR gets reviewed.
+**2. Install the app** on your repos — every PR gets reviewed. The GitHub App
+needs **Checks: read and write** in addition to its content, pull-request, and
+issue permissions so Mira can report a required pass/fail check on every commit.
 
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
 
